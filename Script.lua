@@ -1,19 +1,11 @@
 -- Auto GK for FSS
--- Controls the existing LocalPlayer goalkeeper.
+-- Phase 1: continuous goalkeeper positioning and threat tracking.
 --
--- Main design:
---   1. Find opponent players with HasBall first.
---   2. Associate the active football with the closest possessor.
---   3. Predict the football's trajectory from AssemblyLinearVelocity.
---   4. Move toward the predicted interception point.
---   5. Use the game's actual Leap manager for left/right dives.
+-- The important rule here is simple:
+--   ALWAYS TRACK THE BALL OR THE ATTACKER FIRST.
 --
--- Known game physics:
---   Gravity = 196.1999969482422 (actual trajectory gravity)
---   Sprint speed ~= 27
---
--- The script intentionally does not depend on NetworkOwner for primary
--- possession detection.
+-- Saving/prediction should be layered on top of this behavior later.
+-- The GK should visibly move when the threat moves instead of standing still.
 
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
@@ -21,9 +13,10 @@ local UserInputService = game:GetService("UserInputService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local LocalPlayer = Players.LocalPlayer
+
 local PlayerScripts = LocalPlayer:WaitForChild("PlayerScripts")
-local ClientControllers = PlayerScripts:WaitForChild("Client"):WaitForChild("Controllers")
-local Actions = ClientControllers:WaitForChild("Actions")
+local Controllers = PlayerScripts:WaitForChild("Client"):WaitForChild("Controllers")
+local Actions = Controllers:WaitForChild("Actions")
 
 local Leap = require(
     Actions:WaitForChild("Managers"):WaitForChild("Leap")
@@ -36,20 +29,40 @@ pcall(function()
     MovementController = Knit.GetController("MovementController")
 end)
 
-local GRAVITY = 196.1999969482422
-local PREDICTION_TIME = 2.5
-local PREDICTION_STEP = 1 / 30
+-- =========================
+-- Configuration
+-- =========================
 
-local MOVE_UPDATE_INTERVAL = 0.08
-local DIVE_COOLDOWN = 0.35
-local DIVE_DISTANCE = 11
-local REPOSITION_DISTANCE = 2.5
+local TRACK_UPDATE = 0.05
+local TRACK_DISTANCE = 3.5
+local MAX_LATERAL_OFFSET = 13
+local MAX_DEPTH_OFFSET = 9
 
-local lastMove = 0
-local lastDive = 0
-local debugLast = 0
+local DIVE_COOLDOWN = 0.45
+local DIVE_DISTANCE = 9
+local DIVE_MIN_DISTANCE = 3
+
+local DEBUG_INTERVAL = 0.5
+
+-- =========================
+-- Runtime
+-- =========================
+
 local running = true
 local HeartbeatConnection
+
+local LastMove = 0
+local LastDive = 0
+local LastDebug = 0
+
+local GKState = "IDLE"
+local CurrentThreat
+local CurrentBall
+local CurrentTarget
+
+-- =========================
+-- Character / team
+-- =========================
 
 local function getCharacter()
     local Character = LocalPlayer.Character
@@ -68,22 +81,60 @@ local function getCharacter()
 end
 
 local function getSide()
-    local side = LocalPlayer:GetAttribute("IsHomeOrAway")
+    local Side = LocalPlayer:GetAttribute("IsHomeOrAway")
 
-    if side == "Home" or side == "Away" then
-        return side
+    if Side == "Home" or Side == "Away" then
+        return Side
     end
 end
 
+local function isGoalkeeper()
+    return LocalPlayer:GetAttribute("TeamPosition") == "GK"
+end
+
+local function getPlayerRoot(Player)
+    local Character = Player.Character
+
+    if not Character then
+        return
+    end
+
+    return Character:FindFirstChild("HumanoidRootPart")
+end
+
+local function isOpponent(Player)
+    if Player == LocalPlayer then
+        return false
+    end
+
+    if Player:GetAttribute("IsOnPitch") ~= true then
+        return false
+    end
+
+    local MySide = getSide()
+    local PlayerSide = Player:GetAttribute("IsHomeOrAway")
+
+    if not MySide or not PlayerSide then
+        return false
+    end
+
+    return PlayerSide ~= MySide
+end
+
+-- =========================
+-- Goal
+-- =========================
+
 local function getOwnGoal()
-    local side = getSide()
-    if not side then
+    local Side = getSide()
+
+    if not Side then
         return
     end
 
     local Stadium = workspace:FindFirstChild("Stadium")
     local Teams = Stadium and Stadium:FindFirstChild("Teams")
-    local Team = Teams and Teams:FindFirstChild(side)
+    local Team = Teams and Teams:FindFirstChild(Side)
     local Goal = Team and Team:FindFirstChild("Goal")
 
     if not Goal then
@@ -92,138 +143,119 @@ local function getOwnGoal()
 
     local InterceptionHitbox = Goal:FindFirstChild("InterceptionHitbox")
 
-    if not InterceptionHitbox or not InterceptionHitbox:IsA("BasePart") then
+    if not InterceptionHitbox
+        or not InterceptionHitbox:IsA("BasePart") then
         return
     end
 
     return InterceptionHitbox
 end
 
-local function isOnPitch(Player)
-    return Player:GetAttribute("IsOnPitch") == true
-end
+-- =========================
+-- Football
+-- =========================
 
-local function isOpponent(Player)
-    if Player == LocalPlayer then
-        return false
-    end
-
-    local mySide = getSide()
-    if not mySide then
-        return true
-    end
-
-    local side = Player:GetAttribute("IsHomeOrAway")
-
-    if side == nil then
-        return true
-    end
-
-    return side ~= mySide
-end
-
-local function getRoot(Player)
-    local Character = Player.Character
-    return Character and Character:FindFirstChild("HumanoidRootPart")
-end
-
-local function getActiveFootballs()
+local function getActiveBalls()
     local Misc = workspace:FindFirstChild("Misc")
+
     if not Misc then
         return {}
     end
 
-    local result = {}
+    local Balls = {}
 
     for _, Object in Misc:GetChildren() do
         if Object:IsA("BasePart")
             and Object.Name:sub(1, 9) == "Football "
             and Object:GetAttribute("Enabled") == true then
-            result[#result + 1] = Object
+
+            Balls[#Balls + 1] = Object
         end
     end
 
-    return result
+    return Balls
 end
 
-local function getClosestBallToPosition(Balls, Position)
-    local Closest
-    local ClosestDistance = math.huge
+local function getClosestBall(Balls, Position)
+    local BestBall
+    local BestDistance = math.huge
 
     for _, Ball in Balls do
         local Distance = (Ball.Position - Position).Magnitude
 
-        if Distance < ClosestDistance then
-            ClosestDistance = Distance
-            Closest = Ball
+        if Distance < BestDistance then
+            BestDistance = Distance
+            BestBall = Ball
         end
     end
 
-    return Closest, ClosestDistance
+    return BestBall, BestDistance
 end
 
-local function getPossessingOpponent()
-    local Character, Humanoid, Root = getCharacter()
-    if not Character or Humanoid.Health <= 0 then
-        return
-    end
+-- =========================
+-- Threat selection
+-- =========================
+--
+-- Priority:
+--
+-- 1. Opponent with HasBall.
+-- 2. A nearby moving football.
+--
+-- This means the GK has something to follow even when there is no
+-- immediately dangerous shot.
 
-    local ClosestPlayer
-    local ClosestDistance = math.huge
+local function getThreat(Goal, Root)
+    local Balls = getActiveBalls()
+
+    local Possessor
+    local PossessorDistance = math.huge
 
     for _, Player in Players:GetPlayers() do
         if isOpponent(Player)
-            and isOnPitch(Player)
             and Player:GetAttribute("HasBall") == true then
 
-            local PlayerRoot = getRoot(Player)
+            local PlayerRoot = getPlayerRoot(Player)
 
             if PlayerRoot then
                 local Distance = (PlayerRoot.Position - Root.Position).Magnitude
 
-                if Distance < ClosestDistance then
-                    ClosestDistance = Distance
-                    ClosestPlayer = Player
+                if Distance < PossessorDistance then
+                    PossessorDistance = Distance
+                    Possessor = Player
                 end
             end
         end
     end
 
-    return ClosestPlayer
-end
-
-local function getRelevantBall()
-    local Balls = getActiveFootballs()
-    if #Balls == 0 then
-        return
-    end
-
-    -- Possession is the primary source of truth.
-    local Possessor = getPossessingOpponent()
-
     if Possessor then
-        local PossessorRoot = getRoot(Possessor)
+        local PlayerRoot = getPlayerRoot(Possessor)
+        local Ball, BallDistance
 
-        if PossessorRoot then
-            local Ball, Distance = getClosestBallToPosition(
-                Balls,
-                PossessorRoot.Position
-            )
+        if PlayerRoot then
+            Ball, BallDistance = getClosestBall(Balls, PlayerRoot.Position)
 
-            -- A possessed ball should normally be close to its possessor.
-            if Ball and Distance <= 12 then
-                return Ball, Possessor
+            if Ball and BallDistance <= 14 then
+                return {
+                    Player = Possessor,
+                    Ball = Ball,
+                    Position = Ball.Position,
+                    Type = "POSSESSION",
+                }
             end
+
+            -- Even if the ball lookup is imperfect, the player itself
+            -- is still a valid threat to track.
+            return {
+                Player = Possessor,
+                Ball = Ball,
+                Position = PlayerRoot.Position,
+                Type = "PLAYER",
+            }
         end
     end
 
-    -- Fallback: nobody currently reports HasBall.
-    -- Look for the active football moving toward our goal.
-    local Goal = getOwnGoal()
-    if not Goal then
-        return
-    end
-
+    -- Nobody has HasBall. Find the football that is closest to the GK
+    -- and moving with meaningful speed.
     local BestBall
     local BestScore = math.huge
 
@@ -231,384 +263,85 @@ local function getRelevantBall()
         local Velocity = Ball.AssemblyLinearVelocity
         local Speed = Velocity.Magnitude
 
-        if Speed > 1 then
-            local ToGoal = Goal.Position - Ball.Position
-            local DirectionToGoal = ToGoal.Magnitude > 0 and ToGoal.Unit
+        if Speed > 2 then
+            local Distance = (Ball.Position - Root.Position).Magnitude
 
-            if DirectionToGoal then
-                local TowardGoal = Velocity.Unit:Dot(DirectionToGoal)
+            -- Favor balls that are both close and moving.
+            local Score = Distance / math.max(Speed, 8)
 
-                if TowardGoal > 0.15 then
-                    local Distance = ToGoal.Magnitude
-                    local Score = Distance / math.max(Speed, 1)
-
-                    if Score < BestScore then
-                        BestScore = Score
-                        BestBall = Ball
-                    end
-                end
+            if Score < BestScore then
+                BestScore = Score
+                BestBall = Ball
             end
         end
     end
 
-    return BestBall
-end
-
-local function predictGoalInterception(Ball, Goal)
-    local Position = Ball.Position
-    local Velocity = Ball.AssemblyLinearVelocity
-    local LocalPosition = Goal.CFrame:PointToObjectSpace(Position)
-    local LocalVelocity = Goal.CFrame:VectorToObjectSpace(Velocity)
-
-    if Velocity.Magnitude < 1 then
-        return
-    end
-
-    -- The GK should react to where the ball is going to cross the
-    -- goal plane, not wait until the ball is already inside the goal.
-    if math.abs(LocalVelocity.Z) < 0.5 then
-        return
-    end
-
-    local TimeToPlane = -LocalPosition.Z / LocalVelocity.Z
-
-    if TimeToPlane < 0 or TimeToPlane > PREDICTION_TIME then
-        return
-    end
-
-    local Predicted = Position
-        + Velocity * TimeToPlane
-        + Vector3.new(0, -0.5 * GRAVITY * TimeToPlane * TimeToPlane, 0)
-
-    local LocalPredicted = Goal.CFrame:PointToObjectSpace(Predicted)
-    local HalfSize = Goal.Size * 0.5
-
-    -- If the trajectory is completely outside the goal mouth, don't
-    -- commit to a save. The positioning system can still track the shot.
-    if math.abs(LocalPredicted.X) > HalfSize.X + 5
-        or LocalPredicted.Y < -HalfSize.Y - 5
-        or LocalPredicted.Y > HalfSize.Y + 5 then
-        return
-    end
-
-    return Predicted, TimeToPlane
-end
-
-local function moveTo(Target)
-    local Character, Humanoid = getCharacter()
-    if not Character then
-        return
-    end
-
-    local now = os.clock()
-
-    if now - lastMove < MOVE_UPDATE_INTERVAL then
-        return
-    end
-
-    lastMove = now
-    Humanoid:MoveTo(Target)
-end
-
-local function faceGoal(Root, Goal)
-    -- Leap's Left/Right direction is relative to the character orientation.
-    -- Face along the goal's depth axis, not toward the interception point.
-    local Forward = Goal.CFrame.LookVector
-    local FlatForward = Vector3.new(Forward.X, 0, Forward.Z)
-
-    if FlatForward.Magnitude < 0.01 then
-        return
-    end
-
-    FlatForward = FlatForward.Unit
-
-    Root.CFrame = CFrame.lookAt(
-        Root.Position,
-        Root.Position + FlatForward
-    )
-end
-
-local function tryLeap(Root, Goal, Target)
-    local now = os.clock()
-
-    if now - lastDive < DIVE_COOLDOWN then
-        return
-    end
-
-    local Offset = Target - Root.Position
-    local FlatOffset = Vector3.new(Offset.X, 0, Offset.Z)
-
-    if FlatOffset.Magnitude > DIVE_DISTANCE
-        or FlatOffset.Magnitude < 2 then
-        return
-    end
-
-    -- Establish a stable GK-facing orientation first.
-    -- Do NOT face Target itself, because that would make Target "Forward"
-    -- and destroy the left/right decision.
-    faceGoal(Root, Goal)
-
-    local Side = FlatOffset:Dot(Root.CFrame.RightVector)
-
-    if math.abs(Side) < 1 then
-        return
-    end
-
-    lastDive = now
-
-    if Side > 0 then
-        Leap.Activate("Right")
-    else
-        Leap.Activate("Left")
-    end
-end
-
-local function reposition(Root, Goal, Ball, Possessor, PredictedPosition)
-    local Target = getPositioningTarget(
-        Goal,
-        Ball,
-        Possessor,
-        Root,
-        PredictedPosition
-    )
-
-    if (Root.Position - Target).Magnitude > REPOSITION_DISTANCE then
-        moveTo(Target)
-    end
-end
-
-local function startSprint()
-    if MovementController and MovementController.SetSprintingControlState then
-        pcall(function()
-            MovementController:SetSprintingControlState(true)
-        end)
-    end
-end
-
-local function stopSprint()
-    if MovementController and MovementController.SetSprintingControlState then
-        pcall(function()
-            MovementController:SetSprintingControlState(false)
-        end)
-    end
-end
-
-local function isGoalkeeper()
-    return LocalPlayer:GetAttribute("TeamPosition") == "GK"
-end
-
-local GKState = "IDLE"
-local stateSince = os.clock()
-
-local function setState(NewState)
-    if GKState == NewState then
-        return
-    end
-
-    GKState = NewState
-    stateSince = os.clock()
-end
-
-local function update()
-    if not running then
-        return
-    end
-
-    local Character, Humanoid, Root = getCharacter()
-
-    if not Character or Humanoid.Health <= 0 then
-        return
-    end
-
-    if not isGoalkeeper() then
-        setState("IDLE")
-        stopSprint()
-        return
-    end
-
-    startSprint()
-
-    local Goal = getOwnGoal()
-    if not Goal then
-        setState("IDLE")
-        return
-    end
-
-    -- A GK with the ball is no longer an interceptor.
-    if LocalPlayer:GetAttribute("HasBall") == true then
-        setState("POSSESSION")
-        return
-    end
-
-    local Ball, Possessor = getRelevantBall()
-
-    if not Ball then
-        setState("POSITION")
-        reposition(Root, Goal, nil, nil, nil)
-        return
-    end
-
-    local PredictedPosition, TimeToGoal =
-        predictGoalInterception(Ball, Goal)
-
-    local BallSpeed = Ball.AssemblyLinearVelocity.Magnitude
-    local LocalBall = Goal.CFrame:PointToObjectSpace(Ball.Position)
-
-    -- The GK reacts to the ball even before a shot has a valid goal-plane
-    -- intersection. This prevents the old "stand still until the line"
-    -- behavior.
-    if PredictedPosition then
-        if TimeToGoal <= 0.45 then
-            setState("COMMIT")
-        elseif TimeToGoal <= 1.0 then
-            setState("READY")
-        else
-            setState("TRACK")
-        end
-
-        local Target = getGoalkeeperTarget(
-            Goal,
-            PredictedPosition,
-            Root
-        )
-
-        moveTo(Target)
-
-        if TimeToGoal <= 0.75 then
-            tryLeap(Root, Goal, Target)
-        end
-
-        _G.AutoGKDebug = {
-            State = GKState,
-            StateSince = stateSince,
-            Ball = Ball,
-            Goal = Goal,
-            Possessor = Possessor,
-            PredictedPosition = PredictedPosition,
-            TimeToGoal = TimeToGoal,
-            Target = Target,
-            BallVelocity = Ball.AssemblyLinearVelocity,
-            BallState = Ball:GetAttribute("State"),
-        }
-    else
-        -- Ball is not currently on a direct scoring trajectory.
-        -- Track its lateral movement and the attacker, but keep the GK
-        -- inside a sensible set position.
-        local DistanceToGoal = (Ball.Position - Goal.Position).Magnitude
-
-        if Possessor then
-            setState("TRACK")
-        elseif DistanceToGoal < 45 or BallSpeed > 15 then
-            setState("TRACK")
-        else
-            setState("POSITION")
-        end
-
-        local Target = getPositioningTarget(
-            Goal,
-            Ball,
-            Possessor,
-            Root,
-            nil
-        )
-
-        moveTo(Target)
-
-        _G.AutoGKDebug = {
-            State = GKState,
-            StateSince = stateSince,
-            Ball = Ball,
-            Goal = Goal,
-            Possessor = Possessor,
-            PredictedPosition = nil,
-            TimeToGoal = nil,
-            Target = Target,
-            BallVelocity = Ball.AssemblyLinearVelocity,
-            BallState = Ball:GetAttribute("State"),
-            BallLocalPosition = LocalBall,
+    if BestBall then
+        return {
+            Ball = BestBall,
+            Position = BestBall.Position,
+            Type = "BALL",
         }
     end
 
-    -- Lightweight internal debugging. Throttled so Heartbeat does not spam output.
-    local now = os.clock()
-    if now - debugLast >= 1 then
-        debugLast = now
-        print(("[AutoGK] state=%s ball=%s speed=%.1f t=%s target=%s"):format(
-            GKState,
-            Ball.Name,
-            BallSpeed,
-            TimeToGoal and string.format("%.2f", TimeToGoal) or "nil",
-            tostring(_G.AutoGKDebug.Target)
-        ))
-    end
+    return
 end
 
-HeartbeatConnection = RunService.Heartbeat:Connect(update)
+-- =========================
+-- Goalkeeper target
+-- =========================
+--
+-- The target is deliberately NOT "the predicted goal intersection".
+--
+-- First we make the GK follow the threat:
+--
+--   attacker/ball
+--          |
+--          v
+--     [   GK   ]
+--          |
+--        GOAL
+--
+-- The GK follows the threat laterally and shifts a little in depth.
+-- Both offsets are clamped so the GK does not chase the attacker out
+-- of the goal area.
 
-UserInputService.InputBegan:Connect(function(Input, GameProcessed)
-    if GameProcessed or Input.KeyCode ~= Enum.KeyCode.K or not running then
-        return
-    end
+local function getTrackingTarget(Goal, Threat, Root)
+    local ThreatPosition = Threat.Position
 
-    running = false
-
-    if HeartbeatConnection then
-        HeartbeatConnection:Disconnect()
-        HeartbeatConnection = nil
-    end
-
-    stopSprint()
-    _G.AutoGKDebug = nil
-
-    print("[AutoGK] stopped.")
-end)local function getGoalkeeperTarget(Goal, PredictedPosition, Root)
-    local LocalGoalPoint = Goal.CFrame:PointToObjectSpace(PredictedPosition)
+    local LocalThreat = Goal.CFrame:PointToObjectSpace(ThreatPosition)
     local HalfSize = Goal.Size * 0.5
 
-    LocalGoalPoint = Vector3.new(
-        math.clamp(LocalGoalPoint.X, -HalfSize.X, HalfSize.X),
-        0,
-        HalfSize.Z + 3
+    -- Lateral tracking.
+    --
+    -- Use most of the threat's lateral position rather than a tiny
+    -- fraction. This makes movement visibly responsive.
+    local Lateral = math.clamp(
+        LocalThreat.X * 0.75,
+        -MAX_LATERAL_OFFSET,
+        MAX_LATERAL_OFFSET
     )
 
-    local Target = Goal.CFrame:PointToWorldSpace(LocalGoalPoint)
+    -- Keep the GK close to the goal.
+    --
+    -- We take a small amount of the threat's depth, but clamp it.
+    -- This lets the GK step forward toward a nearby attacker/ball
+    -- without running all the way out.
+    local ThreatDepth = math.clamp(
+        LocalThreat.Z,
+        -MAX_DEPTH_OFFSET,
+        MAX_DEPTH_OFFSET
+    )
 
-    return Vector3.new(Target.X, Root.Position.Y, Target.Z)
-end
+    local Depth = ThreatDepth * 0.35
 
-local function getPositioningTarget(Goal, Ball, Possessor, Root, PredictedPosition)
-    local HalfSize = Goal.Size * 0.5
-
-    -- Start from the normal GK set position: centered and slightly
-    -- in front of the goal line.
-    local lateral = 0
-
-    if PredictedPosition then
-        local LocalPredicted = Goal.CFrame:PointToObjectSpace(PredictedPosition)
-        lateral = LocalPredicted.X
-    elseif Ball then
-        -- While an attacker is carrying the ball, shade toward them.
-        -- This is deliberately conservative so the GK does not get dragged
-        -- out of the center by a distant player.
-        lateral = Goal.CFrame:PointToObjectSpace(Ball.Position).X
-
-        if Possessor then
-            local PossessorRoot = getRoot(Possessor)
-            if PossessorRoot then
-                lateral = Goal.CFrame:PointToObjectSpace(
-                    PossessorRoot.Position
-                ).X
-            end
-        end
-    end
-
-    lateral = math.clamp(lateral * 0.35, -HalfSize.X * 0.65, HalfSize.X * 0.65)
-
-    -- Stay in front of the goal instead of walking along its depth.
+    -- The exact center depth is based on the current goal hitbox.
+    -- Adding a small offset toward the threat makes the GK stand
+    -- slightly in front of the goal instead of directly on its line.
     local LocalTarget = Vector3.new(
-        lateral,
+        Lateral,
         0,
-        HalfSize.Z + 3
+        Depth + math.sign(ThreatDepth) * 2
     )
 
     local WorldTarget = Goal.CFrame:PointToWorldSpace(LocalTarget)
@@ -620,27 +353,59 @@ local function getPositioningTarget(Goal, Ball, Possessor, Root, PredictedPositi
     )
 end
 
+-- =========================
+-- Movement
+-- =========================
+
+local function startSprint()
+    if not MovementController then
+        return
+    end
+
+    pcall(function()
+        MovementController:SetSprintingControlState(true)
+    end)
+end
+
+local function stopSprint()
+    if not MovementController then
+        return
+    end
+
+    pcall(function()
+        MovementController:SetSprintingControlState(false)
+    end)
+end
+
 local function moveTo(Target)
     local Character, Humanoid = getCharacter()
-    if not Character then
+
+    if not Character or not Humanoid then
         return
     end
 
-    local now = os.clock()
+    local Now = os.clock()
 
-    if now - lastMove < MOVE_UPDATE_INTERVAL then
+    if Now - LastMove < TRACK_UPDATE then
         return
     end
 
-    lastMove = now
+    LastMove = Now
+
     Humanoid:MoveTo(Target)
 end
 
-local function faceGoal(Root, Goal)
-    -- Leap's Left/Right direction is relative to the character orientation.
-    -- Face along the goal's depth axis, not toward the interception point.
+-- =========================
+-- Dive
+-- =========================
+
+local function faceGoal(Goal, Root)
     local Forward = Goal.CFrame.LookVector
-    local FlatForward = Vector3.new(Forward.X, 0, Forward.Z)
+    local FlatForward = Vector3.new(
+        Forward.X,
+        0,
+        Forward.Z
+    )
 
     if FlatForward.Magnitude < 0.01 then
         return
@@ -654,33 +419,36 @@ local function faceGoal(Root, Goal)
     )
 end
 
-local function tryLeap(Root, Goal, Target)
-    local now = os.clock()
+local function tryDive(Goal, Root, Target)
+    local Now = os.clock()
 
-    if now - lastDive < DIVE_COOLDOWN then
+    if Now - LastDive < DIVE_COOLDOWN then
         return
     end
 
     local Offset = Target - Root.Position
-    local FlatOffset = Vector3.new(Offset.X, 0, Offset.Z)
+    local FlatOffset = Vector3.new(
+        Offset.X,
+        0,
+        Offset.Z
+    )
 
-    if FlatOffset.Magnitude > DIVE_DISTANCE
-        or FlatOffset.Magnitude < 2 then
+    local Distance = FlatOffset.Magnitude
+
+    if Distance < DIVE_MIN_DISTANCE
+        or Distance > DIVE_DISTANCE then
         return
     end
 
-    -- Establish a stable GK-facing orientation first.
-    -- Do NOT face Target itself, because that would make Target "Forward"
-    -- and destroy the left/right decision.
-    faceGoal(Root, Goal)
+    faceGoal(Goal, Root)
 
     local Side = FlatOffset:Dot(Root.CFrame.RightVector)
 
-    if math.abs(Side) < 1 then
+    if math.abs(Side) < 2 then
         return
     end
 
-    lastDive = now
+    LastDive = Now
 
     if Side > 0 then
         Leap.Activate("Right")
@@ -689,46 +457,9 @@ local function tryLeap(Root, Goal, Target)
     end
 end
 
-local function reposition(Root, Goal)
-    local LocalRoot = Goal.CFrame:PointToObjectSpace(Root.Position)
-    local HalfSize = Goal.Size * 0.5
-
-    local Center = Goal.CFrame:PointToWorldSpace(Vector3.new(
-        0,
-        0,
-        math.clamp(LocalRoot.Z, -HalfSize.Z, HalfSize.Z)
-    ))
-
-    local Target = Vector3.new(
-        Center.X,
-        Root.Position.Y,
-        Center.Z
-    )
-
-    if (Root.Position - Target).Magnitude > REPOSITION_DISTANCE then
-        moveTo(Target)
-    end
-end
-
-local function startSprint()
-    if MovementController and MovementController.SetSprintingControlState then
-        pcall(function()
-            MovementController:SetSprintingControlState(true)
-        end)
-    end
-end
-
-local function stopSprint()
-    if MovementController and MovementController.SetSprintingControlState then
-        pcall(function()
-            MovementController:SetSprintingControlState(false)
-        end)
-    end
-end
-
-local function isGoalkeeper()
-    return LocalPlayer:GetAttribute("TeamPosition") == "GK"
-end
+-- =========================
+-- Main
+-- =========================
 
 local function update()
     if not running then
@@ -737,72 +468,91 @@ local function update()
 
     local Character, Humanoid, Root = getCharacter()
 
-    if not Character or Humanoid.Health <= 0 then
+    if not Character
+        or not Humanoid
+        or Humanoid.Health <= 0 then
         return
     end
 
     if not isGoalkeeper() then
+        GKState = "IDLE"
+        CurrentThreat = nil
+        CurrentBall = nil
+        CurrentTarget = nil
         stopSprint()
+        return
+    end
+
+    local Goal = getOwnGoal()
+
+    if not Goal then
+        GKState = "IDLE"
+        return
+    end
+
+    if LocalPlayer:GetAttribute("HasBall") == true then
+        GKState = "POSSESSION"
+        CurrentThreat = nil
+        CurrentBall = nil
+        CurrentTarget = nil
         return
     end
 
     startSprint()
 
-    local Goal = getOwnGoal()
-    if not Goal then
+    local Threat = getThreat(Goal, Root)
+
+    if not Threat then
+        GKState = "IDLE"
+        CurrentThreat = nil
+        CurrentBall = nil
+        CurrentTarget = nil
         return
     end
 
-    -- If the GK has the ball, don't try to intercept it.
-    if LocalPlayer:GetAttribute("HasBall") == true then
-        return
-    end
+    CurrentThreat = Threat.Player
+    CurrentBall = Threat.Ball
 
-    local Ball = getRelevantBall()
-
-    if not Ball then
-        reposition(Root, Goal)
-        return
-    end
-
-    local PredictedPosition, TimeToGoal =
-        predictGoalInterception(Ball, Goal)
-
-    if not PredictedPosition then
-        reposition(Root, Goal)
-        return
-    end
-
-    local Target = getGoalkeeperTarget(
+    -- THIS IS THE CORE BEHAVIOR:
+    -- every update, find where the ball/player is NOW and move toward
+    -- the corresponding goalkeeper tracking position.
+    local Target = getTrackingTarget(
         Goal,
-        PredictedPosition,
+        Threat,
         Root
     )
 
-    -- Move toward the predicted interception point.
+    CurrentTarget = Target
+    GKState = "TRACK"
+
     moveTo(Target)
 
-    -- Dive when the lateral interception point is close enough.
-    tryLeap(Root, Goal, Target)
+    -- Diving is deliberately secondary. We only attempt it when the
+    -- tracking target is already close enough to the GK.
+    if Threat.Ball then
+        tryDive(Goal, Root, Target)
+    end
 
     _G.AutoGKDebug = {
-        Ball = Ball,
-        Goal = Goal,
-        PredictedPosition = PredictedPosition,
-        TimeToGoal = TimeToGoal,
+        State = GKState,
+        ThreatPlayer = Threat.Player,
+        ThreatType = Threat.Type,
+        Ball = Threat.Ball,
         Target = Target,
-        BallVelocity = Ball.AssemblyLinearVelocity,
-        BallState = Ball:GetAttribute("State"),
+        BallPosition = Threat.Ball and Threat.Ball.Position,
+        BallVelocity = Threat.Ball and Threat.Ball.AssemblyLinearVelocity,
+        BallState = Threat.Ball and Threat.Ball:GetAttribute("State"),
     }
 
-    -- Lightweight internal debugging. Throttled so Heartbeat does not spam output.
-    local now = os.clock()
-    if now - debugLast >= 1 then
-        debugLast = now
-        print(("[AutoGK] ball=%s state=%s t=%.2f target=%s"):format(
-            Ball.Name,
-            tostring(Ball:GetAttribute("State")),
-            TimeToGoal,
+    local Now = os.clock()
+
+    if Now - LastDebug >= DEBUG_INTERVAL then
+        LastDebug = Now
+
+        print(("[AutoGK] state=%s threat=%s type=%s target=%s"):format(
+            GKState,
+            Threat.Player and Threat.Player.Name or "none",
+            Threat.Type,
             tostring(Target)
         ))
     end
@@ -810,8 +560,20 @@ end
 
 HeartbeatConnection = RunService.Heartbeat:Connect(update)
 
+-- =========================
+-- Kill switch
+-- =========================
+
 UserInputService.InputBegan:Connect(function(Input, GameProcessed)
-    if GameProcessed or Input.KeyCode ~= Enum.KeyCode.K or not running then
+    if GameProcessed then
+        return
+    end
+
+    if Input.KeyCode ~= Enum.KeyCode.K then
+        return
+    end
+
+    if not running then
         return
     end
 
@@ -823,6 +585,7 @@ UserInputService.InputBegan:Connect(function(Input, GameProcessed)
     end
 
     stopSprint()
+
     _G.AutoGKDebug = nil
 
     print("[AutoGK] stopped.")
