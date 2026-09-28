@@ -18,6 +18,8 @@ local LastJumpAt = 0
 local LastDiveAt = 0
 local PendingDiveBall
 local PendingDiveStartedAt = 0
+local LastOpponentCarrier
+local LOW_BALL_Y = -230
 
 local BALL_GRAVITY = 196.2
 local PREDICTION_MIN_TIME = 0.08
@@ -379,7 +381,27 @@ local function update()
 
 	local Now = os.clock()
 	local Opponent, OpponentRoot = getOpponentCarrier()
+
+	if Opponent and OpponentRoot then
+		LastOpponentCarrier = Opponent
+	end
+
 	local FreeBall = getNearestFreeBall(Root)
+	local LowBall = FreeBall and FreeBall.Position.Y <= LOW_BALL_Y
+
+	-- When the ball falls far below the pitch, keep the GK on the
+	-- opponent who last had possession instead of chasing the ball.
+	if LowBall and LastOpponentCarrier then
+		local LastRoot = getRoot(LastOpponentCarrier)
+
+		if LastRoot
+			and LastOpponentCarrier:GetAttribute("IsOnPitch") == true
+			and LastOpponentCarrier:GetAttribute("IsHomeOrAway") ~= getSide() then
+			Opponent = LastOpponentCarrier
+			OpponentRoot = LastRoot
+			FreeBall = nil
+		end
+	end
 
 	_G.AutoGKDebug = {
 		ThreatPlayer = Opponent,
