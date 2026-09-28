@@ -244,7 +244,11 @@ local function tryDive(Goal, Ball, Root, Now)
 		return false
 	end
 
-	if LocalBall.X < 0 then
+	-- Leap's Left/Right directions are relative to the GK's
+	-- character orientation, not the goal's orientation.
+	local CharacterBall = Root.CFrame:PointToObjectSpace(Predicted)
+
+	if CharacterBall.X < 0 then
 		Leap.Activate("Left")
 		_G.AutoGKDebug.Dive = "LEFT"
 	else
