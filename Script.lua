@@ -9,7 +9,7 @@
 --   5. Use the game's actual Leap manager for left/right dives.
 --
 -- Known game physics:
---   Gravity = 55
+--   Gravity = 196.1999969482422 (actual trajectory gravity)
 --   Sprint speed ~= 27
 --
 -- The script intentionally does not depend on NetworkOwner for primary
@@ -37,7 +37,7 @@ pcall(function()
 end)
 
 local GRAVITY = 196.1999969482422
-local PREDICTION_TIME = 2
+local PREDICTION_TIME = 2.5
 local PREDICTION_STEP = 1 / 30
 
 local MOVE_UPDATE_INTERVAL = 0.08
@@ -254,63 +254,371 @@ local function getRelevantBall()
     return BestBall
 end
 
-local function pointInsidePart(Part, WorldPoint)
-    local LocalPoint = Part.CFrame:PointToObjectSpace(WorldPoint)
-    local HalfSize = Part.Size * 0.5
-
-    return math.abs(LocalPoint.X) <= HalfSize.X
-        and math.abs(LocalPoint.Y) <= HalfSize.Y
-        and math.abs(LocalPoint.Z) <= HalfSize.Z
-end
-
 local function predictGoalInterception(Ball, Goal)
     local Position = Ball.Position
     local Velocity = Ball.AssemblyLinearVelocity
+    local LocalPosition = Goal.CFrame:PointToObjectSpace(Position)
+    local LocalVelocity = Goal.CFrame:VectorToObjectSpace(Velocity)
 
     if Velocity.Magnitude < 1 then
         return
     end
 
-    local ToGoal = Goal.Position - Position
-
-    if ToGoal.Magnitude > 0 then
-        local TowardGoal = Velocity.Unit:Dot(ToGoal.Unit)
-
-        if TowardGoal < 0.05 then
-            return
-        end
+    -- The GK should react to where the ball is going to cross the
+    -- goal plane, not wait until the ball is already inside the goal.
+    if math.abs(LocalVelocity.Z) < 0.5 then
+        return
     end
 
-    local time = 0
+    local TimeToPlane = -LocalPosition.Z / LocalVelocity.Z
 
-    while time <= PREDICTION_TIME do
-        local Predicted = Position
-            + Velocity * time
-            + Vector3.new(0, -0.5 * GRAVITY * time * time, 0)
+    if TimeToPlane < 0 or TimeToPlane > PREDICTION_TIME then
+        return
+    end
 
-        if pointInsidePart(Goal, Predicted) then
-            return Predicted, time
-        end
+    local Predicted = Position
+        + Velocity * TimeToPlane
+        + Vector3.new(0, -0.5 * GRAVITY * TimeToPlane * TimeToPlane, 0)
 
-        time += PREDICTION_STEP
+    local LocalPredicted = Goal.CFrame:PointToObjectSpace(Predicted)
+    local HalfSize = Goal.Size * 0.5
+
+    -- If the trajectory is completely outside the goal mouth, don't
+    -- commit to a save. The positioning system can still track the shot.
+    if math.abs(LocalPredicted.X) > HalfSize.X + 5
+        or LocalPredicted.Y < -HalfSize.Y - 5
+        or LocalPredicted.Y > HalfSize.Y + 5 then
+        return
+    end
+
+    return Predicted, TimeToPlane
+end
+
+local function moveTo(Target)
+    local Character, Humanoid = getCharacter()
+    if not Character then
+        return
+    end
+
+    local now = os.clock()
+
+    if now - lastMove < MOVE_UPDATE_INTERVAL then
+        return
+    end
+
+    lastMove = now
+    Humanoid:MoveTo(Target)
+end
+
+local function faceGoal(Root, Goal)
+    -- Leap's Left/Right direction is relative to the character orientation.
+    -- Face along the goal's depth axis, not toward the interception point.
+    local Forward = Goal.CFrame.LookVector
+    local FlatForward = Vector3.new(Forward.X, 0, Forward.Z)
+
+    if FlatForward.Magnitude < 0.01 then
+        return
+    end
+
+    FlatForward = FlatForward.Unit
+
+    Root.CFrame = CFrame.lookAt(
+        Root.Position,
+        Root.Position + FlatForward
+    )
+end
+
+local function tryLeap(Root, Goal, Target)
+    local now = os.clock()
+
+    if now - lastDive < DIVE_COOLDOWN then
+        return
+    end
+
+    local Offset = Target - Root.Position
+    local FlatOffset = Vector3.new(Offset.X, 0, Offset.Z)
+
+    if FlatOffset.Magnitude > DIVE_DISTANCE
+        or FlatOffset.Magnitude < 2 then
+        return
+    end
+
+    -- Establish a stable GK-facing orientation first.
+    -- Do NOT face Target itself, because that would make Target "Forward"
+    -- and destroy the left/right decision.
+    faceGoal(Root, Goal)
+
+    local Side = FlatOffset:Dot(Root.CFrame.RightVector)
+
+    if math.abs(Side) < 1 then
+        return
+    end
+
+    lastDive = now
+
+    if Side > 0 then
+        Leap.Activate("Right")
+    else
+        Leap.Activate("Left")
     end
 end
 
-local function getGoalkeeperTarget(Goal, PredictedPosition, Root)
-    -- Goal X is the lateral direction for these goal hitboxes.
-    -- Keep the GK at the center depth of the interception box.
+local function reposition(Root, Goal, Ball, Possessor, PredictedPosition)
+    local Target = getPositioningTarget(
+        Goal,
+        Ball,
+        Possessor,
+        Root,
+        PredictedPosition
+    )
+
+    if (Root.Position - Target).Magnitude > REPOSITION_DISTANCE then
+        moveTo(Target)
+    end
+end
+
+local function startSprint()
+    if MovementController and MovementController.SetSprintingControlState then
+        pcall(function()
+            MovementController:SetSprintingControlState(true)
+        end)
+    end
+end
+
+local function stopSprint()
+    if MovementController and MovementController.SetSprintingControlState then
+        pcall(function()
+            MovementController:SetSprintingControlState(false)
+        end)
+    end
+end
+
+local function isGoalkeeper()
+    return LocalPlayer:GetAttribute("TeamPosition") == "GK"
+end
+
+local GKState = "IDLE"
+local stateSince = os.clock()
+
+local function setState(NewState)
+    if GKState == NewState then
+        return
+    end
+
+    GKState = NewState
+    stateSince = os.clock()
+end
+
+local function update()
+    if not running then
+        return
+    end
+
+    local Character, Humanoid, Root = getCharacter()
+
+    if not Character or Humanoid.Health <= 0 then
+        return
+    end
+
+    if not isGoalkeeper() then
+        setState("IDLE")
+        stopSprint()
+        return
+    end
+
+    startSprint()
+
+    local Goal = getOwnGoal()
+    if not Goal then
+        setState("IDLE")
+        return
+    end
+
+    -- A GK with the ball is no longer an interceptor.
+    if LocalPlayer:GetAttribute("HasBall") == true then
+        setState("POSSESSION")
+        return
+    end
+
+    local Ball, Possessor = getRelevantBall()
+
+    if not Ball then
+        setState("POSITION")
+        reposition(Root, Goal, nil, nil, nil)
+        return
+    end
+
+    local PredictedPosition, TimeToGoal =
+        predictGoalInterception(Ball, Goal)
+
+    local BallSpeed = Ball.AssemblyLinearVelocity.Magnitude
+    local LocalBall = Goal.CFrame:PointToObjectSpace(Ball.Position)
+
+    -- The GK reacts to the ball even before a shot has a valid goal-plane
+    -- intersection. This prevents the old "stand still until the line"
+    -- behavior.
+    if PredictedPosition then
+        if TimeToGoal <= 0.45 then
+            setState("COMMIT")
+        elseif TimeToGoal <= 1.0 then
+            setState("READY")
+        else
+            setState("TRACK")
+        end
+
+        local Target = getGoalkeeperTarget(
+            Goal,
+            PredictedPosition,
+            Root
+        )
+
+        moveTo(Target)
+
+        if TimeToGoal <= 0.75 then
+            tryLeap(Root, Goal, Target)
+        end
+
+        _G.AutoGKDebug = {
+            State = GKState,
+            StateSince = stateSince,
+            Ball = Ball,
+            Goal = Goal,
+            Possessor = Possessor,
+            PredictedPosition = PredictedPosition,
+            TimeToGoal = TimeToGoal,
+            Target = Target,
+            BallVelocity = Ball.AssemblyLinearVelocity,
+            BallState = Ball:GetAttribute("State"),
+        }
+    else
+        -- Ball is not currently on a direct scoring trajectory.
+        -- Track its lateral movement and the attacker, but keep the GK
+        -- inside a sensible set position.
+        local DistanceToGoal = (Ball.Position - Goal.Position).Magnitude
+
+        if Possessor then
+            setState("TRACK")
+        elseif DistanceToGoal < 45 or BallSpeed > 15 then
+            setState("TRACK")
+        else
+            setState("POSITION")
+        end
+
+        local Target = getPositioningTarget(
+            Goal,
+            Ball,
+            Possessor,
+            Root,
+            nil
+        )
+
+        moveTo(Target)
+
+        _G.AutoGKDebug = {
+            State = GKState,
+            StateSince = stateSince,
+            Ball = Ball,
+            Goal = Goal,
+            Possessor = Possessor,
+            PredictedPosition = nil,
+            TimeToGoal = nil,
+            Target = Target,
+            BallVelocity = Ball.AssemblyLinearVelocity,
+            BallState = Ball:GetAttribute("State"),
+            BallLocalPosition = LocalBall,
+        }
+    end
+
+    -- Lightweight internal debugging. Throttled so Heartbeat does not spam output.
+    local now = os.clock()
+    if now - debugLast >= 1 then
+        debugLast = now
+        print(("[AutoGK] state=%s ball=%s speed=%.1f t=%s target=%s"):format(
+            GKState,
+            Ball.Name,
+            BallSpeed,
+            TimeToGoal and string.format("%.2f", TimeToGoal) or "nil",
+            tostring(_G.AutoGKDebug.Target)
+        ))
+    end
+end
+
+HeartbeatConnection = RunService.Heartbeat:Connect(update)
+
+UserInputService.InputBegan:Connect(function(Input, GameProcessed)
+    if GameProcessed or Input.KeyCode ~= Enum.KeyCode.K or not running then
+        return
+    end
+
+    running = false
+
+    if HeartbeatConnection then
+        HeartbeatConnection:Disconnect()
+        HeartbeatConnection = nil
+    end
+
+    stopSprint()
+    _G.AutoGKDebug = nil
+
+    print("[AutoGK] stopped.")
+end)local function getGoalkeeperTarget(Goal, PredictedPosition, Root)
     local LocalGoalPoint = Goal.CFrame:PointToObjectSpace(PredictedPosition)
     local HalfSize = Goal.Size * 0.5
 
     LocalGoalPoint = Vector3.new(
         math.clamp(LocalGoalPoint.X, -HalfSize.X, HalfSize.X),
         0,
-        0
+        HalfSize.Z + 3
     )
 
     local Target = Goal.CFrame:PointToWorldSpace(LocalGoalPoint)
 
     return Vector3.new(Target.X, Root.Position.Y, Target.Z)
+end
+
+local function getPositioningTarget(Goal, Ball, Possessor, Root, PredictedPosition)
+    local HalfSize = Goal.Size * 0.5
+    local LocalBall = Goal.CFrame:PointToObjectSpace(Ball.Position)
+
+    -- Start from the normal GK set position: centered and slightly
+    -- in front of the goal line.
+    local lateral = 0
+
+    if PredictedPosition then
+        local LocalPredicted = Goal.CFrame:PointToObjectSpace(PredictedPosition)
+        lateral = LocalPredicted.X
+    else
+        -- While an attacker is carrying the ball, shade toward them.
+        -- This is deliberately conservative so the GK does not get dragged
+        -- out of the center by a distant player.
+        lateral = LocalBall.X
+
+        if Possessor then
+            local PossessorRoot = getRoot(Possessor)
+            if PossessorRoot then
+                lateral = Goal.CFrame:PointToObjectSpace(
+                    PossessorRoot.Position
+                ).X
+            end
+        end
+    end
+
+    lateral = math.clamp(lateral * 0.35, -HalfSize.X * 0.65, HalfSize.X * 0.65)
+
+    -- Stay in front of the goal instead of walking along its depth.
+    local LocalTarget = Vector3.new(
+        lateral,
+        0,
+        HalfSize.Z + 3
+    )
+
+    local WorldTarget = Goal.CFrame:PointToWorldSpace(LocalTarget)
+
+    return Vector3.new(
+        WorldTarget.X,
+        Root.Position.Y,
+        WorldTarget.Z
+    )
 end
 
 local function moveTo(Target)
