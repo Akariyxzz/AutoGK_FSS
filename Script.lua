@@ -13,7 +13,9 @@ local Camera = workspace.CurrentCamera
 
 local Running = true
 local MovementController
+local Leap
 local LastJumpAt = 0
+local LastDiveAt = 0
 
 local BALL_GRAVITY = 196.2
 local PREDICTION_MIN_TIME = 0.08
@@ -26,6 +28,12 @@ local OVERHEAD_RADIUS = 5
 
 pcall(function()
 	MovementController = Knit.GetController("MovementController")
+end)
+
+pcall(function()
+	Leap = require(
+		LocalPlayer.PlayerScripts.Client.Controllers.Actions.Managers.Leap
+	)
 end)
 
 local function getRoot(Player)
@@ -203,6 +211,54 @@ local function getBallTrackingTarget(Goal, Ball)
 	))
 end
 
+local function tryDive(Goal, Ball, Root, Now)
+	if not Leap or not Ball then
+		return false
+	end
+
+	if Now - LastDiveAt < 1.0 then
+		return false
+	end
+
+	local GoalCFrame = Goal:GetPivot()
+	local Predicted = predictBallPosition(Ball, 0.18)
+	local LocalBall = GoalCFrame:PointToObjectSpace(Predicted)
+
+	-- Only dive for a ball that is actually threatening the goal.
+	-- This prevents the GK from diving for harmless balls far upfield.
+	local GoalDepth = math.abs(LocalBall.Z)
+	if GoalDepth > 13 then
+		return false
+	end
+
+	if math.abs(LocalBall.X) < 4.5 then
+		return false
+	end
+
+	local Velocity = Ball.AssemblyLinearVelocity
+	local LocalVelocity = GoalCFrame:VectorToObjectSpace(Velocity)
+
+	-- The ball must be moving toward the goal plane.
+	local GoalDirection = LocalBall.Z >= 0 and -1 or 1
+	if LocalVelocity.Z * GoalDirection <= 5 then
+		return false
+	end
+
+	if LocalBall.X < 0 then
+		Leap.Activate("Left")
+		_G.AutoGKDebug.Dive = "LEFT"
+	else
+		Leap.Activate("Right")
+		_G.AutoGKDebug.Dive = "RIGHT"
+	end
+
+	LastDiveAt = Now
+	_G.AutoGKDebug.DiveBall = Ball
+	_G.AutoGKDebug.DivePrediction = Predicted
+
+	return true
+end
+
 local function trackCamera(Position)
 	local CameraPosition = Camera.CFrame.Position
 	local LookPosition = Position + Vector3.new(0, 1.5, 0)
@@ -279,6 +335,14 @@ local function update()
 	local Goal = getGoal()
 
 	if not Goal then
+		return
+	end
+
+	_G.AutoGKDebug.Dive = false
+
+	-- Dive for a dangerous loose ball before normal tracking.
+	if FreeBall and tryDive(Goal, FreeBall, Root, Now) then
+		trackCamera(FreeBall.Position)
 		return
 	end
 
