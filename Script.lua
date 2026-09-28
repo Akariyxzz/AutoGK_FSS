@@ -31,6 +31,9 @@ local OVERHEAD_RADIUS = 5
 
 local GK_LOOSE_BALL_PLAYER_RADIUS = 15
 local GK_LOOSE_BALL_DIVE_DISTANCE = 12
+local GK_RECOVERY_MAX_LATERAL = 12
+local GK_RECOVERY_TIME_MARGIN = 0.4
+local PLAYER_RUN_SPEED = 27
 
 pcall(function()
 	MovementController = Knit.GetController("MovementController")
@@ -343,9 +346,12 @@ local function tryOverheadJump(Threat, Root, Humanoid, Now)
 	return true
 end
 
-local function isPlayerNearBall(Ball)
+local function getNearestOpponentToBall(Ball)
 	local BallPosition = Ball.Position
 	local MySide = getSide()
+
+	local NearestPlayer
+	local NearestDistance = math.huge
 
 	for _, Player in Players:GetPlayers() do
 		if Player ~= LocalPlayer
@@ -360,14 +366,15 @@ local function isPlayerNearBall(Ball)
 					- Vector3.new(BallPosition.X, 0, BallPosition.Z)
 				).Magnitude
 
-				if Distance <= GK_LOOSE_BALL_PLAYER_RADIUS then
-					return true
+				if Distance < NearestDistance then
+					NearestDistance = Distance
+					NearestPlayer = Player
 				end
 			end
 		end
 	end
 
-	return false
+	return NearestPlayer, NearestDistance
 end
 
 local function tryLooseBallRecovery(Threat, Root, Humanoid, Now)
@@ -376,14 +383,43 @@ local function tryLooseBallRecovery(Threat, Root, Humanoid, Now)
 	end
 
 	local Ball = Threat.Ball
+	local Goal = getGoal()
 
-	-- A loose ball inside our goalkeeper area is immediately recoverable.
-	-- The GK only commits if no opponent is close enough to contest it.
-	if not isBallInGoalkeeperArea(Ball) then
+	if not Goal or not isBallInGoalkeeperArea(Ball) then
 		return false
 	end
 
-	if isPlayerNearBall(Ball) then
+	local GoalCFrame = Goal:GetPivot()
+	local LocalBall = GoalCFrame:PointToObjectSpace(Ball.Position)
+
+	-- Never chase a ball all the way to the side of the area. Keep enough
+	-- central coverage that an opponent cannot simply take it and shoot
+	-- into the now-open goal.
+	if math.abs(LocalBall.X) > GK_RECOVERY_MAX_LATERAL then
+		return false
+	end
+
+	local Opponent, OpponentDistance = getNearestOpponentToBall(Ball)
+
+	if Opponent and OpponentDistance <= GK_LOOSE_BALL_PLAYER_RADIUS then
+		return false
+	end
+
+	-- Estimate who reaches the ball first. If an opponent can get there
+	-- before the GK (with a safety margin), stay home instead of gambling.
+	local GKDistance = (
+		Vector3.new(Root.Position.X, 0, Root.Position.Z)
+		- Vector3.new(Ball.Position.X, 0, Ball.Position.Z)
+	).Magnitude
+
+	local GKTime = GKDistance / PLAYER_RUN_SPEED
+	local OpponentTime = math.huge
+
+	if Opponent then
+		OpponentTime = OpponentDistance / PLAYER_RUN_SPEED
+	end
+
+	if OpponentTime <= GKTime + GK_RECOVERY_TIME_MARGIN then
 		return false
 	end
 
@@ -395,9 +431,7 @@ local function tryLooseBallRecovery(Threat, Root, Humanoid, Now)
 		BallPosition.Z
 	))
 
-	local Distance = (BallPosition - Root.Position).Magnitude
-
-	if Distance <= GK_LOOSE_BALL_DIVE_DISTANCE
+	if GKDistance <= GK_LOOSE_BALL_DIVE_DISTANCE
 		and Now - LastDiveAt >= 1.25
 		and Leap then
 		Leap.Activate()
@@ -406,7 +440,10 @@ local function tryLooseBallRecovery(Threat, Root, Humanoid, Now)
 
 	_G.AutoGKDebug.Recovery = true
 	_G.AutoGKDebug.RecoveryBall = Ball
-	_G.AutoGKDebug.RecoveryDistance = Distance
+	_G.AutoGKDebug.RecoveryDistance = GKDistance
+	_G.AutoGKDebug.RecoveryOpponentDistance = OpponentDistance
+	_G.AutoGKDebug.RecoveryGKTime = GKTime
+	_G.AutoGKDebug.RecoveryOpponentTime = OpponentTime
 
 	return true
 end
