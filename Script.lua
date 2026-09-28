@@ -1,6 +1,6 @@
 -- Auto GK for FSS
--- Tracks the active threat, predicts free-ball movement, and jumps for
--- overhead balls. Loose-ball GK recovery is intentionally disabled.
+-- Tracks opponent ball carriers without chasing loose footballs.
+-- Loose footballs are only considered for overhead jump detection.
 
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
@@ -81,20 +81,12 @@ local function getActiveBalls()
 	return Balls
 end
 
-local function getThreat()
+local function getOpponentCarrier()
 	local MySide = getSide()
 
 	if not MySide then
 		return
 	end
-
-	local MyRoot = getRoot(LocalPlayer)
-
-	if not MyRoot then
-		return
-	end
-
-	local PossessingPlayer
 
 	for _, Player in Players:GetPlayers() do
 		if Player ~= LocalPlayer
@@ -105,18 +97,19 @@ local function getThreat()
 			local Root = getRoot(Player)
 
 			if Root then
-				PossessingPlayer = Player
-				break
+				return Player, Root
 			end
 		end
 	end
+end
 
+local function getNearestFreeBall(Root)
 	local BestBall
 	local BestDistance = math.huge
 
 	for _, Ball in getActiveBalls() do
 		if Ball:GetAttribute("State") ~= "Possessed" then
-			local Distance = (Ball.Position - MyRoot.Position).Magnitude
+			local Distance = (Ball.Position - Root.Position).Magnitude
 
 			if Distance < BestDistance then
 				BestDistance = Distance
@@ -125,25 +118,7 @@ local function getThreat()
 		end
 	end
 
-	if BestBall then
-		return {
-			Ball = BestBall,
-			Position = BestBall.Position,
-			Type = "BALL",
-		}
-	end
-
-	if PossessingPlayer then
-		local Root = getRoot(PossessingPlayer)
-
-		if Root then
-			return {
-				Player = PossessingPlayer,
-				Position = Root.Position,
-				Type = "PLAYER",
-			}
-		end
-	end
+	return BestBall
 end
 
 local function predictBallPosition(Ball, Time)
@@ -153,23 +128,6 @@ local function predictBallPosition(Ball, Time)
 	return Position
 		+ Velocity * Time
 		+ Vector3.new(0, -BALL_GRAVITY * 0.5 * Time * Time, 0)
-end
-
-local function getPredictedBallPosition(Ball)
-	local Velocity = Ball.AssemblyLinearVelocity
-	local Speed = Velocity.Magnitude
-
-	if Speed < 1 then
-		return Ball.Position, 0
-	end
-
-	local Horizon = math.clamp(
-		20 / Speed,
-		PREDICTION_MIN_TIME,
-		PREDICTION_MAX_TIME
-	)
-
-	return predictBallPosition(Ball, Horizon), Horizon
 end
 
 local function getOverheadPrediction(Ball, Root)
@@ -199,25 +157,11 @@ local function getOverheadPrediction(Ball, Root)
 	end
 end
 
-local function getTrackingTarget(Goal, Threat, Root)
+local function getTrackingTarget(Goal, Player, Root)
 	local GoalCFrame = Goal:GetPivot()
-
-	if Threat.Type == "BALL" then
-		local Predicted, PredictionTime = getPredictedBallPosition(
-			Threat.Ball
-		)
-
-		_G.AutoGKDebug.PredictedBall = Predicted
-		_G.AutoGKDebug.PredictionTime = PredictionTime
-
-		return Vector3.new(
-			Predicted.X,
-			Root.Position.Y,
-			Predicted.Z
-		)
-	end
-
-	local LocalThreat = GoalCFrame:PointToObjectSpace(Threat.Position)
+	local LocalThreat = GoalCFrame:PointToObjectSpace(
+		Player.Character.HumanoidRootPart.Position
+	)
 
 	local Lateral = math.clamp(
 		LocalThreat.X * 0.15,
@@ -243,9 +187,9 @@ local function getTrackingTarget(Goal, Threat, Root)
 	return GoalCFrame:PointToWorldSpace(LocalTarget)
 end
 
-local function trackCamera(ThreatPosition)
+local function trackCamera(Position)
 	local CameraPosition = Camera.CFrame.Position
-	local LookPosition = ThreatPosition + Vector3.new(0, 1.5, 0)
+	local LookPosition = Position + Vector3.new(0, 1.5, 0)
 
 	Camera.CFrame = CFrame.lookAt(
 		CameraPosition,
@@ -253,13 +197,13 @@ local function trackCamera(ThreatPosition)
 	)
 end
 
-local function tryOverheadJump(Threat, Root, Humanoid, Now)
-	if Threat.Type ~= "BALL" or not Threat.Ball then
+local function tryOverheadJump(Ball, Root, Humanoid, Now)
+	if not Ball then
 		return false
 	end
 
 	local Predicted, PredictionTime = getOverheadPrediction(
-		Threat.Ball,
+		Ball,
 		Root
 	)
 
@@ -277,6 +221,7 @@ local function tryOverheadJump(Threat, Root, Humanoid, Now)
 	end
 
 	_G.AutoGKDebug.Jump = true
+	_G.AutoGKDebug.JumpBall = Ball
 	_G.AutoGKDebug.JumpPrediction = Predicted
 	_G.AutoGKDebug.JumpPredictionTime = PredictionTime
 
@@ -305,9 +250,27 @@ local function update()
 	end
 
 	local Now = os.clock()
-	local Threat = getThreat()
+	local Opponent, OpponentRoot = getOpponentCarrier()
+	local FreeBall = getNearestFreeBall(Root)
 
-	if not Threat then
+	_G.AutoGKDebug = {
+		ThreatPlayer = Opponent,
+		ThreatBall = FreeBall,
+		ThreatType = Opponent and "PLAYER" or nil,
+		Jump = false,
+	}
+
+	-- A loose ball can trigger a jump, but it can NEVER become the
+	-- goalkeeper's movement target.
+	if tryOverheadJump(FreeBall, Root, Humanoid, Now) then
+		if FreeBall then
+			trackCamera(FreeBall.Position)
+		end
+
+		return
+	end
+
+	if not Opponent or not OpponentRoot then
 		return
 	end
 
@@ -317,20 +280,7 @@ local function update()
 		return
 	end
 
-	_G.AutoGKDebug = {
-		ThreatPlayer = Threat.Player,
-		ThreatBall = Threat.Ball,
-		ThreatType = Threat.Type,
-		ThreatPosition = Threat.Position,
-		Jump = false,
-	}
-
-	if tryOverheadJump(Threat, Root, Humanoid, Now) then
-		trackCamera(Threat.Position)
-		return
-	end
-
-	local Target = getTrackingTarget(Goal, Threat, Root)
+	local Target = getTrackingTarget(Goal, Opponent, Root)
 
 	Target = Vector3.new(
 		Target.X,
@@ -349,7 +299,7 @@ local function update()
 	_G.AutoGKDebug.Target = Target
 	_G.AutoGKDebug.DistanceToTarget = DistanceToTarget
 
-	trackCamera(Threat.Position)
+	trackCamera(OpponentRoot.Position)
 end
 
 RunService.Heartbeat:Connect(update)
