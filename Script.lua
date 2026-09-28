@@ -46,6 +46,49 @@ local function getGoal()
 	return Goal
 end
 
+local function getActiveBalls()
+	local Misc = workspace:FindFirstChild("Misc")
+
+	if not Misc then
+		return {}
+	end
+
+	local Balls = {}
+
+	for _, Object in Misc:GetChildren() do
+		if Object:IsA("BasePart")
+			and Object.Name:sub(1, 9) == "Football "
+			and Object:GetAttribute("Enabled") == true then
+			Balls[#Balls + 1] = Object
+		end
+	end
+
+	return Balls
+end
+
+local function getNearestBall(Position)
+	local BestBall
+	local BestDistance = math.huge
+
+	for _, Ball in getActiveBalls() do
+		local Distance = (Ball.Position - Position).Magnitude
+
+		if Distance < BestDistance then
+			BestDistance = Distance
+			BestBall = Ball
+		end
+	end
+
+	return BestBall
+end
+
+-- Threat priority:
+-- 1. Opponent currently possessing the ball.
+-- 2. Nearest active football.
+--
+-- We do not permanently follow the opponent. The selected threat itself
+-- becomes the point the GK positions against.
+
 local function getThreat()
 	local MySide = getSide()
 
@@ -53,10 +96,13 @@ local function getThreat()
 		return
 	end
 
-	local BestPlayer
-	local BestRoot
-	local BestDistance = math.huge
+	local MyRoot = getRoot(LocalPlayer)
 
+	if not MyRoot then
+		return
+	end
+
+	-- Player comes first because we know exactly who is controlling the play.
 	for _, Player in Players:GetPlayers() do
 		if Player ~= LocalPlayer
 			and Player:GetAttribute("IsOnPitch") == true
@@ -66,22 +112,25 @@ local function getThreat()
 			local Root = getRoot(Player)
 
 			if Root then
-				local MyRoot = getRoot(LocalPlayer)
-
-				if MyRoot then
-					local Distance = (Root.Position - MyRoot.Position).Magnitude
-
-					if Distance < BestDistance then
-						BestDistance = Distance
-						BestPlayer = Player
-						BestRoot = Root
-					end
-				end
+				return {
+					Player = Player,
+					Position = Root.Position,
+					Type = "PLAYER",
+				}
 			end
 		end
 	end
 
-	return BestPlayer, BestRoot
+	-- Nobody possesses it, so track the nearest active football instead.
+	local Ball = getNearestBall(MyRoot.Position)
+
+	if Ball then
+		return {
+			Ball = Ball,
+			Position = Ball.Position,
+			Type = "BALL",
+		}
+	end
 end
 
 local function getTrackingTarget(Goal, ThreatPosition, CurrentPosition)
