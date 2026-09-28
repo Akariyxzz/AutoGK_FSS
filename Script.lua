@@ -163,18 +163,21 @@ local function getTrackingTarget(Goal, ThreatPosition, CurrentPosition)
 	local GoalCFrame = Goal:GetPivot()
 	local LocalThreat = GoalCFrame:PointToObjectSpace(ThreatPosition)
 
-	-- Stay centered with the attacker's/ball's lateral position,
-	-- but never leave the useful goalkeeper area.
-	local Lateral = math.clamp(LocalThreat.X, -14, 14)
+	-- Do not mirror the attacker's full lateral movement. The GK should
+	-- stay between the ball carrier and the center of the goal.
+	local Lateral = math.clamp(
+		LocalThreat.X * 0.70,
+		-10,
+		10
+	)
 
-	-- A real GK does not stand glued to the goal line. Step forward
-	-- toward the play, but become more conservative as the threat
-	-- gets farther away.
+	-- Step noticeably in front of the goal line toward the play.
+	-- This keeps the GK active without letting it run too far out.
 	local DistanceFromGoal = math.abs(LocalThreat.Z)
 	local Forward = math.clamp(
-		18 - DistanceFromGoal * 0.10,
-		3,
-		10
+		DistanceFromGoal * 0.30,
+		6,
+		11
 	)
 
 	local DepthSign = LocalThreat.Z >= 0 and 1 or -1
