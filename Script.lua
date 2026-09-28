@@ -1,6 +1,6 @@
 -- Auto GK for FSS
--- Tracks opponent ball carriers without chasing loose footballs.
--- Loose footballs are only considered for overhead jump detection.
+-- Tracks opponent ball carriers and loose footballs without chasing
+-- the football outside the goalkeeper's useful positioning area.
 
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
@@ -157,7 +157,7 @@ local function getOverheadPrediction(Ball, Root)
 	end
 end
 
-local function getTrackingTarget(Goal, Player, Root)
+local function getPlayerTrackingTarget(Goal, Player)
 	local GoalCFrame = Goal:GetPivot()
 	local LocalThreat = GoalCFrame:PointToObjectSpace(
 		Player.Character.HumanoidRootPart.Position
@@ -178,13 +178,29 @@ local function getTrackingTarget(Goal, Player, Root)
 
 	local DepthSign = LocalThreat.Z >= 0 and 1 or -1
 
-	local LocalTarget = Vector3.new(
+	return GoalCFrame:PointToWorldSpace(Vector3.new(
 		Lateral,
 		0,
 		DepthSign * Forward
-	)
+	))
+end
 
-	return GoalCFrame:PointToWorldSpace(LocalTarget)
+local function getBallTrackingTarget(Goal, Ball)
+	local GoalCFrame = Goal:GetPivot()
+	local Predicted = predictBallPosition(Ball, 0.12)
+	local LocalBall = GoalCFrame:PointToObjectSpace(Predicted)
+
+	-- Follow the ball laterally across the goal mouth, but clamp depth
+	-- so a distant loose ball cannot pull the GK out of position.
+	local Lateral = math.clamp(LocalBall.X, -12, 12)
+	local DepthSign = LocalBall.Z >= 0 and 1 or -1
+	local Forward = math.clamp(math.abs(LocalBall.Z) * 0.15, 6, 11)
+
+	return GoalCFrame:PointToWorldSpace(Vector3.new(
+		Lateral,
+		0,
+		DepthSign * Forward
+	))
 end
 
 local function trackCamera(Position)
@@ -260,8 +276,14 @@ local function update()
 		Jump = false,
 	}
 
-	-- A loose ball can trigger a jump, but it can NEVER become the
-	-- goalkeeper's movement target.
+	local Goal = getGoal()
+
+	if not Goal then
+		return
+	end
+
+	-- A loose ball can trigger a jump. Jumping does not make the ball
+	-- the movement target by itself.
 	if tryOverheadJump(FreeBall, Root, Humanoid, Now) then
 		if FreeBall then
 			trackCamera(FreeBall.Position)
@@ -270,17 +292,18 @@ local function update()
 		return
 	end
 
-	if not Opponent or not OpponentRoot then
+	local Target
+	local CameraTarget
+
+	if Opponent and OpponentRoot then
+		Target = getPlayerTrackingTarget(Goal, Opponent)
+		CameraTarget = OpponentRoot.Position
+	elseif FreeBall then
+		Target = getBallTrackingTarget(Goal, FreeBall)
+		CameraTarget = FreeBall.Position
+	else
 		return
 	end
-
-	local Goal = getGoal()
-
-	if not Goal then
-		return
-	end
-
-	local Target = getTrackingTarget(Goal, Opponent, Root)
 
 	Target = Vector3.new(
 		Target.X,
@@ -298,8 +321,9 @@ local function update()
 
 	_G.AutoGKDebug.Target = Target
 	_G.AutoGKDebug.DistanceToTarget = DistanceToTarget
+	_G.AutoGKDebug.ThreatType = Opponent and "PLAYER" or "BALL"
 
-	trackCamera(OpponentRoot.Position)
+	trackCamera(CameraTarget)
 end
 
 RunService.Heartbeat:Connect(update)
