@@ -435,13 +435,20 @@ local function update()
 
 	_G.AutoGKDebug.Dive = false
 
+	-- If the ball is elevated and approaching the GK, jump first.
+	-- The apex dive is handled separately once the GK has risen.
+	if FreeBall and tryOverheadJump(FreeBall, Root, Humanoid, Now) then
+		trackCamera(FreeBall.Position)
+		return
+	end
+
 	-- Finish an overhead save by diving at the apex of the jump.
 	if tryPendingDive(Goal, Root, Humanoid, Now) then
 		trackCamera(PendingDiveBall and PendingDiveBall.Position or Root.Position)
 		return
 	end
 
-	-- Dive for a dangerous loose ball before normal tracking.
+	-- Dive for a dangerous ground-level ball.
 	if FreeBall and tryDive(Goal, FreeBall, Root, Now) then
 		trackCamera(FreeBall.Position)
 		return
@@ -449,7 +456,7 @@ local function update()
 
 	-- A loose ball can trigger a jump. Jumping does not make the ball
 	-- the movement target by itself.
-	if tryOverheadJump(FreeBall, Root, Humanoid, Now) then
+	if false then
 		if FreeBall then
 			trackCamera(FreeBall.Position)
 		end
