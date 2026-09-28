@@ -192,9 +192,17 @@ local function getOverheadPrediction(Ball, Root)
 end
 
 local function getPlayerTrackingTarget(Goal, Player)
-	local GoalCFrame = Goal:GetPivot()
+	local ThreatRoot = Player.Character and Player.Character:FindFirstChild("HumanoidRootPart")
+	if not ThreatRoot then
+		return
+	end
+
+	-- Use the actual interception box as the goal reference. The Goal
+	-- model pivot is not guaranteed to be the physical center of the goal.
+	local Interception = Goal:FindFirstChild("InterceptionHitbox")
+	local GoalCFrame = Interception and Interception.CFrame or Goal:GetPivot()
 	local GoalPosition = GoalCFrame.Position
-	local ThreatPosition = Player.Character.HumanoidRootPart.Position
+	local ThreatPosition = ThreatRoot.Position
 
 	local ToThreat = Vector3.new(
 		ThreatPosition.X - GoalPosition.X,
@@ -203,33 +211,36 @@ local function getPlayerTrackingTarget(Goal, Player)
 	)
 
 	local DistanceFromGoal = ToThreat.Magnitude
-
 	if DistanceFromGoal < 0.1 then
 		return GoalPosition
 	end
 
 	local DirectionToThreat = ToThreat.Unit
+	local LocalThreat = GoalCFrame:PointToObjectSpace(ThreatPosition)
 
-	-- Put the GK directly between the goal and the shooter.
-	-- This makes wide-angle threats pull the GK forward toward the
-	-- shooter instead of only changing a fixed goal-axis coordinate.
+	-- Wide angles need the GK to step out toward the shooter, not just
+	-- slide sideways. The target is deliberately based on the real
+	-- goal-to-shooter line so the movement is visible and substantial.
 	local AngleWidth = math.clamp(
-		math.abs(GoalCFrame:PointToObjectSpace(ThreatPosition).X)
-			/ math.max(math.abs(GoalCFrame:PointToObjectSpace(ThreatPosition).Z), 1),
+		math.abs(LocalThreat.X) / math.max(math.abs(LocalThreat.Z), 1),
 		0,
 		1.5
 	)
 
-	local Forward = math.clamp(
-		8 + AngleWidth * 7,
-		8,
-		18
+local Forward = math.clamp(
+		10 + AngleWidth * 5,
+		10,
+		17
 	)
 
-	-- Never move farther forward than the shooter itself.
-	Forward = math.min(Forward, math.max(DistanceFromGoal - 2, 6))
+	-- Never place the GK beyond the attacker.
+	Forward = math.min(
+		Forward,
+		math.max(DistanceFromGoal - 3, 6)
+	)
 
-	return GoalPosition + DirectionToThreat * Forward
+	local Target = GoalPosition + DirectionToThreat * Forward
+	return Vector3.new(Target.X, ThreatRoot.Position.Y, Target.Z)
 end
 
 local function getBallTrackingTarget(Goal, Ball)
