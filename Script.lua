@@ -578,7 +578,6 @@ end
 
 local function getPositioningTarget(Goal, Ball, Possessor, Root, PredictedPosition)
     local HalfSize = Goal.Size * 0.5
-    local LocalBall = Goal.CFrame:PointToObjectSpace(Ball.Position)
 
     -- Start from the normal GK set position: centered and slightly
     -- in front of the goal line.
@@ -587,11 +586,11 @@ local function getPositioningTarget(Goal, Ball, Possessor, Root, PredictedPositi
     if PredictedPosition then
         local LocalPredicted = Goal.CFrame:PointToObjectSpace(PredictedPosition)
         lateral = LocalPredicted.X
-    else
+    elseif Ball then
         -- While an attacker is carrying the ball, shade toward them.
         -- This is deliberately conservative so the GK does not get dragged
         -- out of the center by a distant player.
-        lateral = LocalBall.X
+        lateral = Goal.CFrame:PointToObjectSpace(Ball.Position).X
 
         if Possessor then
             local PossessorRoot = getRoot(Possessor)
