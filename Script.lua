@@ -214,9 +214,9 @@ local function getPlayerTrackingTarget(Goal, Player)
 	-- Forward movement closes the shooting angle. Keep it conservative
 	-- so the GK does not abandon the goal line.
 	local Forward = math.clamp(
-		BaseDepth + AngleWidth * 2.5,
+		BaseDepth + AngleWidth * 6,
 		6,
-		10
+		13
 	)
 
 	-- Match the GK laterally to the shooter's angle, but leave enough
