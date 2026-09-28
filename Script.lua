@@ -1,9 +1,9 @@
 -- Auto GK for FSS
--- Tracking + loose-ball recovery.
+-- Tracking + loose-ball recovery + basic trajectory prediction.
 --
--- The goalkeeper tracks the opponent when they have possession, tracks free
--- footballs directly, and can leave the line to recover a loose ball that
--- has remained unpossessed for 3 seconds.
+-- The goalkeeper tracks the opponent when they have possession, predicts
+-- free-ball movement using the live football velocity, and can jump when a
+-- predicted shot enters a small overhead interception zone.
 
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
@@ -18,8 +18,18 @@ local Running = true
 local MovementController
 local Leap
 local LastDiveAt = 0
+local LastJumpAt = 0
 
 local FreeBallSince = {}
+
+local BALL_GRAVITY = 196.2
+local PREDICTION_MIN_TIME = 0.08
+local PREDICTION_MAX_TIME = 0.55
+local PREDICTION_STEP = 0.05
+
+local OVERHEAD_MIN_HEIGHT = 1.5
+local OVERHEAD_MAX_HEIGHT = 7
+local OVERHEAD_RADIUS = 5
 
 pcall(function()
 	MovementController = Knit.GetController("MovementController")
@@ -144,9 +154,6 @@ local function getThreat()
 		return
 	end
 
-	-- A possessed football is hidden underground, so its Position is
-	-- deliberately not used as the threat position. In that state,
-	-- track the opponent who actually possesses it.
 	local PossessingPlayer
 
 	for _, Player in Players:GetPlayers() do
@@ -164,7 +171,6 @@ local function getThreat()
 		end
 	end
 
-	-- Prefer a genuinely free football. Possessed footballs are ignored.
 	local BestBall
 	local BestDistance = math.huge
 
@@ -187,7 +193,6 @@ local function getThreat()
 		}
 	end
 
-	-- No free football: if somebody possesses it, use their position.
 	if PossessingPlayer then
 		local Root = getRoot(PossessingPlayer)
 
@@ -201,31 +206,94 @@ local function getThreat()
 	end
 end
 
-local function getTrackingTarget(Goal, Threat)
-	local GoalCFrame = Goal:GetPivot()
-	local LocalThreat = GoalCFrame:PointToObjectSpace(Threat.Position)
+local function predictBallPosition(Ball, Time)
+	local Position = Ball.Position
+	local Velocity = Ball.AssemblyLinearVelocity
 
-	-- A free ball is the actual target. Do not reduce or offset its lateral
-	-- position: the GK should move directly to the ball.
-	if Threat.Type == "BALL" then
-		local WorldTarget = GoalCFrame:PointToWorldSpace(Vector3.new(
-			LocalThreat.X,
-			0,
-			LocalThreat.Z
-		))
+	return Position
+		+ Velocity * Time
+		+ Vector3.new(0, -BALL_GRAVITY * 0.5 * Time * Time, 0)
+end
 
-		return WorldTarget
+local function getPredictedBallPosition(Ball, Root)
+	local Velocity = Ball.AssemblyLinearVelocity
+	local Speed = Velocity.Magnitude
+
+	if Speed < 1 then
+		return Ball.Position, 0
 	end
 
-	-- When an opponent has the ball, only follow a small amount of their
-	-- lateral movement so they cannot drag the GK across most of the goal.
+	-- Longer prediction for faster shots, but keep the horizon deliberately
+	-- short because the game's exact velocity damping is not yet modeled.
+	local Horizon = math.clamp(
+		20 / Speed,
+		PREDICTION_MIN_TIME,
+		PREDICTION_MAX_TIME
+	)
+
+	return predictBallPosition(Ball, Horizon), Horizon
+end
+
+local function getOverheadPrediction(Ball, Root)
+	local Velocity = Ball.AssemblyLinearVelocity
+
+	-- A ball that is not travelling upward cannot be the kind of lifted shot
+	-- this jump detector is intended to handle.
+	if Velocity.Y <= 8 then
+		return
+	end
+
+	for Time = PREDICTION_MIN_TIME, PREDICTION_MAX_TIME, PREDICTION_STEP do
+		local Predicted = predictBallPosition(Ball, Time)
+		local Height = Predicted.Y - Root.Position.Y
+
+		if Height >= OVERHEAD_MIN_HEIGHT
+			and Height <= OVERHEAD_MAX_HEIGHT then
+
+			local Horizontal = Vector3.new(
+				Predicted.X - Root.Position.X,
+				0,
+				Predicted.Z - Root.Position.Z
+			)
+
+			if Horizontal.Magnitude <= OVERHEAD_RADIUS then
+				return Predicted, Time
+			end
+		end
+	end
+end
+
+local function getTrackingTarget(Goal, Threat, Root)
+	local GoalCFrame = Goal:GetPivot()
+
+	if Threat.Type == "BALL" then
+		local Predicted, PredictionTime = getPredictedBallPosition(
+			Threat.Ball,
+			Root
+		)
+
+		_G.AutoGKDebug.PredictedBall = Predicted
+		_G.AutoGKDebug.PredictionTime = PredictionTime
+
+		-- Track the predicted position instead of blindly following the current
+		-- ball position. This is intentionally conservative until exact ball
+		-- damping/trajectory behavior is fully known.
+		return Vector3.new(
+			Predicted.X,
+			Root.Position.Y,
+			Predicted.Z
+		)
+	end
+
+	local LocalThreat = GoalCFrame:PointToObjectSpace(Threat.Position)
+
+	-- Only follow 15% of the ball carrier's lateral movement.
 	local Lateral = math.clamp(
 		LocalThreat.X * 0.15,
 		-4,
 		4
 	)
 
-	-- Stay somewhat off the line and toward the attacker.
 	local DistanceFromGoal = math.abs(LocalThreat.Z)
 	local Forward = math.clamp(
 		DistanceFromGoal * 0.30,
@@ -274,6 +342,34 @@ local function updateFreeBallTimers(Balls, Now)
 	end
 end
 
+local function tryOverheadJump(Threat, Root, Humanoid, Now)
+	if Threat.Type ~= "BALL" or not Threat.Ball then
+		return false
+	end
+
+	local Ball = Threat.Ball
+	local Predicted, PredictionTime = getOverheadPrediction(Ball, Root)
+
+	if not Predicted then
+		return false
+	end
+
+	if Now - LastJumpAt < 0.75 then
+		return true
+	end
+
+	if Humanoid.FloorMaterial ~= Enum.Material.Air then
+		Humanoid:ChangeState(Enum.HumanoidStateType.Jumping)
+		LastJumpAt = Now
+	end
+
+	_G.AutoGKDebug.Jump = true
+	_G.AutoGKDebug.JumpPrediction = Predicted
+	_G.AutoGKDebug.JumpPredictionTime = PredictionTime
+
+	return true
+end
+
 local function tryLooseBallRecovery(Threat, Root, Humanoid, Now)
 	if Threat.Type ~= "BALL" or not Threat.Ball then
 		return false
@@ -290,16 +386,14 @@ local function tryLooseBallRecovery(Threat, Root, Humanoid, Now)
 		return false
 	end
 
-	-- Run directly to the loose ball.
 	local BallPosition = Ball.Position
+
 	Humanoid:MoveTo(Vector3.new(
 		BallPosition.X,
 		Root.Position.Y,
 		BallPosition.Z
 	))
 
-	-- Once close enough, use the game's actual forward Leap action to dive
-	-- toward the ball. The Leap manager handles its own action cooldown.
 	local Distance = (BallPosition - Root.Position).Magnitude
 
 	if Distance <= 12
@@ -307,14 +401,6 @@ local function tryLooseBallRecovery(Threat, Root, Humanoid, Now)
 		and Leap then
 		Leap.Activate()
 		LastDiveAt = Now
-	end
-
-	-- Also allow a normal jump when the ball is above the GK's body. This
-	-- gives the goalkeeper a way to reach elevated loose balls.
-	if BallPosition.Y - Root.Position.Y > 1.5
-		and Distance <= 10
-		and Humanoid.FloorMaterial ~= Enum.Material.Air then
-		Humanoid:ChangeState(Enum.HumanoidStateType.Jumping)
 	end
 
 	_G.AutoGKDebug.Recovery = true
@@ -367,14 +453,22 @@ local function update()
 		ThreatType = Threat.Type,
 		ThreatPosition = Threat.Position,
 		Recovery = false,
+		Jump = false,
 	}
+
+	-- Jump detection is separate from normal tracking: only a predicted shot
+	-- entering the small overhead zone can trigger it.
+	if tryOverheadJump(Threat, Root, Humanoid, Now) then
+		trackCamera(Threat.Position)
+		return
+	end
 
 	if tryLooseBallRecovery(Threat, Root, Humanoid, Now) then
 		trackCamera(Threat.Position)
 		return
 	end
 
-	local Target = getTrackingTarget(Goal, Threat)
+	local Target = getTrackingTarget(Goal, Threat, Root)
 
 	Target = Vector3.new(
 		Target.X,
