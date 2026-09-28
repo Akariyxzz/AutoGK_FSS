@@ -1237,34 +1237,33 @@ Do not assume a released ball travels forever using a constant velocity because 
 
 Confirmed values:
 
-- Current position: `Ball.Position`
-- Current velocity: `Ball.AssemblyLinearVelocity`
-- Gravity: `196.1999969482422`
+- Current position: Ball.Position
+- Current velocity: Ball.AssemblyLinearVelocity
+- Gravity: 196.1999969482422
+
+The GK should NOT wait for the predicted football position to enter the goal hitbox before reacting.
+
+The current Auto GK predictor estimates when the ball crosses the goal's local Z=0 plane:
+
+1. Convert the football position into the goal's local space.
+2. Convert the live velocity into the goal's local space.
+3. Solve the time required for local Z to reach 0.
+4. Reject negative or excessively distant interception times.
+5. Apply the confirmed gravity to the predicted world position.
+6. Use the predicted local X position as the goalkeeper's lateral target.
+7. Keep the goalkeeper several studs in front of the goal rather than directly on the goal line.
+
+This makes the goalkeeper react while the shot is still approaching the goal.
 
 Basic ballistic approximation:
 
-```lua
-local Predicted =
-    Position
-    + Velocity * Time
-    + Vector3.new(
-        0,
-        -0.5 * 196.1999969482422 * Time * Time,
-        0
-    )
-```
+Position + Velocity * Time + Vector3.new(0, -0.5 * 196.1999969482422 * Time * Time, 0)
 
 This is only the no-dampening approximation.
 
-The actual game also has:
-
-`VelocityDampening = 0.755`
-
-but the exact implementation of that damping has not yet been confirmed.
+The actual game also has VelocityDampening = 0.755, but the exact implementation of that damping has not yet been confirmed.
 
 Do not claim the simple equation is the exact game physics.
-
----
 
 # 35. Diving strategy
 
@@ -1528,75 +1527,91 @@ When modifying `Script.lua`:
 
 # 41. Current Auto GK design
 
-Current intended flow:
+The current implementation uses explicit goalkeeper behavior states rather than treating the GK as a simple "move to the predicted goal point" bot.
 
-```
+States currently used:
+
+- IDLE: LocalPlayer is not currently acting as GK or required GK data is unavailable.
+- POSITION: No immediate scoring trajectory is detected; maintain a sensible central/set position.
+- TRACK: Track an attacker or approaching football and shade laterally toward the threat.
+- READY: A scoring trajectory exists with roughly 0.45–1.0 seconds until the goal plane.
+- COMMIT: A scoring trajectory is close, with roughly 0–0.45 seconds until the goal plane; move aggressively and allow a dive.
+- POSSESSION: LocalPlayer has HasBall == true; interception behavior stops.
+
+Positioning behavior:
+
+- The GK's set position is several studs in front of the goal line.
+- When tracking, the GK moves only a fraction of the ball/attacker's lateral displacement.
+- This prevents a distant attacker from dragging the GK all the way sideways.
+- The GK can begin moving before a shot reaches the goal.
+- Fast shots are evaluated using their time to the goal plane rather than waiting for a hitbox intersection.
+- If there is no ball, the GK returns toward the set position instead of using the old goal-center depth behavior.
+
+Main flow:
+
 LocalPlayer
-    |
-    +-- TeamPosition == "GK"?
-    |
-    +-- IsHomeOrAway -> own team
-    |
-    +-- own Goal -> InterceptionHitbox
-    |
-    +-- opponent Players
-            |
-            +-- IsOnPitch == true
-            |
-            +-- HasBall == true
-                    |
-                    +-- nearest active Football
-                            |
-                            +-- AssemblyLinearVelocity
-                            |
-                            +-- trajectory prediction
-                                    |
-                                    +-- interception point
-                                            |
-                                            +-- Humanoid:MoveTo()
-                                            |
-                                            +-- Leap.Activate("Left"/"Right")
-```
+  |
+  +-- TeamPosition == GK?
+  |
+  +-- own Goal -> InterceptionHitbox
+  |
+  +-- LocalPlayer HasBall?
+  |     |
+  |     +-- yes -> POSSESSION
+  |
+  +-- opponent HasBall / active football
+        |
+        +-- direct goal-plane trajectory?
+        |     |
+        |     +-- yes -> TRACK / READY / COMMIT
+        |            |
+        |            +-- MoveTo predicted lateral position
+        |            |
+        |            +-- Leap when close enough
+        |
+        +-- no -> TRACK / POSITION
+               |
+               +-- shade toward ball/possessor
+               |
+               +-- remain centered and in front of goal
 
-Fallback when nobody has `HasBall == true`:
+Fallback when nobody has HasBall == true:
 
-```
 workspace.Misc
-    |
-    +-- active Football BaseParts
-            |
-            +-- AssemblyLinearVelocity
+  |
+  +-- active Football BaseParts
+        |
+        +-- AssemblyLinearVelocity
+              |
+              +-- moving toward own goal?
                     |
-                    +-- moving toward own goal?
-                            |
-                            +-- trajectory prediction
-```
-
-The system should remain conservative when the football is not clearly threatening the goal.
-
----
+                    +-- goal-plane prediction
 
 # 42. Debugging
 
 The current script exposes:
 
-```lua
 _G.AutoGKDebug
-```
 
 Useful fields:
 
-- `Ball`
-- `Goal`
-- `PredictedPosition`
-- `TimeToGoal`
-- `Target`
+- State
+- StateSince
+- Ball
+- Goal
+- Possessor
+- PredictedPosition
+- TimeToGoal
+- Target
+- BallVelocity
+- BallState
+- BallLocalPosition when there is no direct goal-plane prediction
 
-This is intended for testing and tuning the prediction system.
+The script also prints a throttled one-line status approximately once per second.
+
+This is intended for testing and tuning the goalkeeper state machine and prediction system.
 
 If the bot behaves incorrectly, inspect these values before changing physics assumptions.
-
----
 
 # 43. Source/decompile references
 
@@ -1642,11 +1657,25 @@ Recorded:
 
 ## Physics correction
 
-The first Auto GK implementation incorrectly recorded football gravity as `55`.
+The first Auto GK implementation incorrectly recorded football gravity as 55.
 
 Correct value:
 
-`196.1999969482422`
+196.1999969482422
 
-The value `55` must NOT be used as the football trajectory gravity.
+The value 55 must NOT be used as the football trajectory gravity.
 
+## Reactive GK state machine
+
+The initial implementation only reacted after the predicted trajectory entered the goal interception box. This caused the GK to remain stationary until the shot was almost on the line and could fail to react appropriately to fast shots.
+
+The current implementation uses:
+
+- Goal-plane interception timing instead of waiting for hitbox entry.
+- IDLE, POSITION, TRACK, READY, COMMIT, and POSSESSION states.
+- Conservative lateral shading toward the ball or attacking possessor.
+- A set position several studs in front of the goal.
+- Earlier movement for approaching shots.
+- Leap only during the closer COMMIT window.
+
+These are Auto GK heuristics, not confirmed game AI behavior.
