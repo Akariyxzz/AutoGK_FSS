@@ -205,9 +205,9 @@ local function update()
 		return
 	end
 
-	local Threat, ThreatRoot = getThreat()
+	local Threat = getThreat()
 
-	if not ThreatRoot then
+	if not Threat then
 		return
 	end
 
@@ -219,19 +219,23 @@ local function update()
 
 	local Target = getTrackingTarget(
 		Goal,
-		ThreatRoot.Position,
+		Threat.Position,
 		Root.Position
 	)
 
 	Humanoid:MoveTo(Target)
 
 	_G.AutoGKDebug = {
-		ThreatPlayer = Threat,
-		ThreatPosition = ThreatRoot.Position,
+		ThreatPlayer = Threat.Player,
+		ThreatBall = Threat.Ball,
+		ThreatType = Threat.Type,
+		ThreatPosition = Threat.Position,
 		Target = Target,
 	}
 
-	trackCamera(ThreatRoot)
+	-- The camera follows whichever threat is currently selected:
+	-- the ball carrier or the football.
+	trackCamera(Threat.Position)
 end
 
 RunService.Heartbeat:Connect(update)
