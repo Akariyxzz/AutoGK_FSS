@@ -1,9 +1,6 @@
 -- Auto GK for FSS
--- Tracking + loose-ball recovery + basic trajectory prediction.
---\aaa
--- The goalkeeper tracks the opponent when they have possession, predicts
--- free-ball movement using the live football velocity, and can jump when a
--- predicted shot enters a small overhead interception zone.
+-- Tracks the active threat, predicts free-ball movement, and jumps for
+-- overhead balls. Loose-ball GK recovery is intentionally disabled.
 
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
@@ -16,7 +13,6 @@ local Camera = workspace.CurrentCamera
 
 local Running = true
 local MovementController
-local Leap
 local LastJumpAt = 0
 
 local BALL_GRAVITY = 196.2
@@ -30,12 +26,6 @@ local OVERHEAD_RADIUS = 5
 
 pcall(function()
 	MovementController = Knit.GetController("MovementController")
-end)
-
-pcall(function()
-	Leap = require(
-		Players.LocalPlayer.PlayerScripts.Client.Controllers.Actions.Managers.Leap
-	)
 end)
 
 local function getRoot(Player)
@@ -69,53 +59,6 @@ local function getGoal()
 	end
 
 	return Goal
-end
-
-local function getGoalkeeperArea()
-	local Side = getSide()
-
-	if Side ~= "Home" and Side ~= "Away" then
-		return
-	end
-
-	local Stadium = workspace:FindFirstChild("Stadium")
-	local Teams = Stadium and Stadium:FindFirstChild("Teams")
-	local Team = Teams and Teams:FindFirstChild(Side)
-	local Barriers = Team and Team:FindFirstChild("Barriers")
-	local Goalkeeper = Barriers and Barriers:FindFirstChild("Goalkeeper")
-
-	if not Goalkeeper then
-		return
-	end
-
-	return Goalkeeper
-end
-
-local function isPointInPart(Point, Part)
-	local LocalPoint = Part.CFrame:PointToObjectSpace(Point)
-	local HalfSize = Part.Size * 0.5
-
-	return math.abs(LocalPoint.X) <= HalfSize.X
-		and math.abs(LocalPoint.Y) <= HalfSize.Y
-		and math.abs(LocalPoint.Z) <= HalfSize.Z
-end
-
-local function isBallInGoalkeeperArea(Ball)
-	local Area = getGoalkeeperArea()
-
-	if not Area then
-		return false
-	end
-
-	for _, Object in Area:GetDescendants() do
-		if Object:IsA("BasePart") and Object.Name == "NoCharacter" then
-			if isPointInPart(Ball.Position, Object) then
-				return true
-			end
-		end
-	end
-
-	return false
 end
 
 local function getActiveBalls()
@@ -212,7 +155,7 @@ local function predictBallPosition(Ball, Time)
 		+ Vector3.new(0, -BALL_GRAVITY * 0.5 * Time * Time, 0)
 end
 
-local function getPredictedBallPosition(Ball, Root)
+local function getPredictedBallPosition(Ball)
 	local Velocity = Ball.AssemblyLinearVelocity
 	local Speed = Velocity.Magnitude
 
@@ -261,8 +204,7 @@ local function getTrackingTarget(Goal, Threat, Root)
 
 	if Threat.Type == "BALL" then
 		local Predicted, PredictionTime = getPredictedBallPosition(
-			Threat.Ball,
-			Root
+			Threat.Ball
 		)
 
 		_G.AutoGKDebug.PredictedBall = Predicted
@@ -316,8 +258,10 @@ local function tryOverheadJump(Threat, Root, Humanoid, Now)
 		return false
 	end
 
-	local Ball = Threat.Ball
-	local Predicted, PredictionTime = getOverheadPrediction(Ball, Root)
+	local Predicted, PredictionTime = getOverheadPrediction(
+		Threat.Ball,
+		Root
+	)
 
 	if not Predicted then
 		return false
@@ -339,14 +283,17 @@ local function tryOverheadJump(Threat, Root, Humanoid, Now)
 	return true
 end
 
-local function getNearestOpponentToBall(Ball)
-	local BallPosition = Ball.Position
-	local MySide = getSide()
+local function update()
+	if not Running then
+		return
+	end
 
-	local NearestPlayer
-	local NearestDistance = math.huge
+	if LocalPlayer:GetAttribute("TeamPosition") ~= "GK" then
+		return
+	end
 
-	for _, Playal Humanoid = Character and Character:FindFirstChildOfClass("Humanoid")
+	local Character = LocalPlayer.Character
+	local Humanoid = Character and Character:FindFirstChildOfClass("Humanoid")
 	local Root = Character and Character:FindFirstChild("HumanoidRootPart")
 
 	if not Humanoid or not Root or Humanoid.Health <= 0 then
@@ -382,7 +329,6 @@ local function getNearestOpponentToBall(Ball)
 		trackCamera(Threat.Position)
 		return
 	end
-
 
 	local Target = getTrackingTarget(Goal, Threat, Root)
 
