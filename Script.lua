@@ -21,10 +21,12 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local LocalPlayer = Players.LocalPlayer
 local PlayerScripts = LocalPlayer:WaitForChild("PlayerScripts")
-
 local ClientControllers = PlayerScripts:WaitForChild("Client"):WaitForChild("Controllers")
 local Actions = ClientControllers:WaitForChild("Actions")
-local Leap = require(Actions:WaitForChild("Managers"):WaitForChild("Leap"))
+
+local Leap = require(
+    Actions:WaitForChild("Managers"):WaitForChild("Leap")
+)
 
 local Knit = require(ReplicatedStorage.Packages.Knit)
 
@@ -67,8 +69,6 @@ local function getSide()
     if side == "Home" or side == "Away" then
         return side
     end
-
-    return
 end
 
 local function getOwnGoal()
@@ -109,11 +109,9 @@ local function isOpponent(Player)
         return true
     end
 
-    -- The game uses IsHomeOrAway to identify the player's side.
     local side = Player:GetAttribute("IsHomeOrAway")
 
     if side == nil then
-        -- Do not reject the player if the side attribute is temporarily absent.
         return true
     end
 
@@ -203,7 +201,10 @@ local function getRelevantBall()
         local PossessorRoot = getRoot(Possessor)
 
         if PossessorRoot then
-            local Ball, Distance = getClosestBallToPosition(Balls, PossessorRoot.Position)
+            local Ball, Distance = getClosestBallToPosition(
+                Balls,
+                PossessorRoot.Position
+            )
 
             -- A possessed ball should normally be close to its possessor.
             if Ball and Distance <= 12 then
@@ -266,7 +267,6 @@ local function predictGoalInterception(Ball, Goal)
         return
     end
 
-    -- Reject balls whose current velocity is clearly moving away from goal.
     local ToGoal = Goal.Position - Position
 
     if ToGoal.Magnitude > 0 then
@@ -293,9 +293,9 @@ local function predictGoalInterception(Ball, Goal)
 end
 
 local function getGoalkeeperTarget(Goal, PredictedPosition, Root)
-    -- Keep the GK inside the goal/interception region horizontally.
+    -- Goal X is the lateral direction for these goal hitboxes.
+    -- Keep the GK at the center depth of the interception box.
     local LocalGoalPoint = Goal.CFrame:PointToObjectSpace(PredictedPosition)
-
     local HalfSize = Goal.Size * 0.5
 
     LocalGoalPoint = Vector3.new(
@@ -306,22 +306,44 @@ local function getGoalkeeperTarget(Goal, PredictedPosition, Root)
 
     local Target = Goal.CFrame:PointToWorldSpace(LocalGoalPoint)
 
-    -- Keep the goalkeeper around its current Y level.
-    Target = Vector3.new(Target.X, Root.Position.Y, Target.Z)
-
-    return Target
+    return Vector3.new(Target.X, Root.Position.Y, Target.Z)
 end
 
-local function faceTarget(Root, Target)
-    local FlatTarget = Vector3.new(Target.X, Root.Position.Y, Target.Z)
-    local Direction = FlatTarget - Root.Position
-
-    if Direction.Magnitude > 0.05 then
-        Root.CFrame = CFrame.lookAt(Root.Position, FlatTarget)
+local function moveTo(Target)
+    local Character, Humanoid = getCharacter()
+    if not Character then
+        return
     end
+
+    local now = os.clock()
+
+    if now - lastMove < MOVE_UPDATE_INTERVAL then
+        return
+    end
+
+    lastMove = now
+    Humanoid:MoveTo(Target)
 end
 
-local function tryLeap(Root, Target)
+local function faceGoal(Root, Goal)
+    -- Leap's Left/Right direction is relative to the character orientation.
+    -- Face along the goal's depth axis, not toward the interception point.
+    local Forward = Goal.CFrame.LookVector
+    local FlatForward = Vector3.new(Forward.X, 0, Forward.Z)
+
+    if FlatForward.Magnitude < 0.01 then
+        return
+    end
+
+    FlatForward = FlatForward.Unit
+
+    Root.CFrame = CFrame.lookAt(
+        Root.Position,
+        Root.Position + FlatForward
+    )
+end
+
+local function tryLeap(Root, Goal, Target)
     local now = os.clock()
 
     if now - lastDive < DIVE_COOLDOWN then
@@ -331,19 +353,17 @@ local function tryLeap(Root, Target)
     local Offset = Target - Root.Position
     local FlatOffset = Vector3.new(Offset.X, 0, Offset.Z)
 
-    if FlatOffset.Magnitude > DIVE_DISTANCE then
+    if FlatOffset.Magnitude > DIVE_DISTANCE
+        or FlatOffset.Magnitude < 2 then
         return
     end
 
-    if FlatOffset.Magnitude < 2 then
-        return
-    end
+    -- Establish a stable GK-facing orientation first.
+    -- Do NOT face Target itself, because that would make Target "Forward"
+    -- and destroy the left/right decision.
+    faceGoal(Root, Goal)
 
-    -- Leap uses the character's current orientation to determine left/right.
-    faceTarget(Root, Target)
-
-    local Right = Root.CFrame.RightVector
-    local Side = FlatOffset:Dot(Right)
+    local Side = FlatOffset:Dot(Root.CFrame.RightVector)
 
     if math.abs(Side) < 1 then
         return
@@ -362,34 +382,21 @@ local function reposition(Root, Goal)
     local LocalRoot = Goal.CFrame:PointToObjectSpace(Root.Position)
     local HalfSize = Goal.Size * 0.5
 
-    -- Center the goalkeeper on the goal when there is no immediate threat.
     local Center = Goal.CFrame:PointToWorldSpace(Vector3.new(
         0,
         0,
         math.clamp(LocalRoot.Z, -HalfSize.Z, HalfSize.Z)
     ))
 
-    local Target = Vector3.new(Center.X, Root.Position.Y, Center.Z)
+    local Target = Vector3.new(
+        Center.X,
+        Root.Position.Y,
+        Center.Z
+    )
 
     if (Root.Position - Target).Magnitude > REPOSITION_DISTANCE then
-        HumanoidMoveTo(Target)
+        moveTo(Target)
     end
-end
-
-function HumanoidMoveTo(Target)
-    local Character, Humanoid, Root = getCharacter()
-    if not Character then
-        return
-    end
-
-    local now = os.clock()
-
-    if now - lastMove < MOVE_UPDATE_INTERVAL then
-        return
-    end
-
-    lastMove = now
-    Humanoid:MoveTo(Target)
 end
 
 local function startSprint()
@@ -409,15 +416,7 @@ local function stopSprint()
 end
 
 local function isGoalkeeper()
-    local Position = LocalPlayer:GetAttribute("TeamPosition")
-
-    if Position == "GK" then
-        return true
-    end
-
-    -- Some game systems use an IsGoalie/IsGoalkeeper-style state.
-    -- Do not require it because TeamPosition == GK is already known.
-    return false
+    return LocalPlayer:GetAttribute("TeamPosition") == "GK"
 end
 
 local function update()
@@ -439,7 +438,7 @@ local function update()
         return
     end
 
-    -- If the GK has the ball, do not try to intercept it.
+    -- If the GK has the ball, don't try to intercept it.
     if LocalPlayer:GetAttribute("HasBall") == true then
         return
     end
@@ -451,22 +450,26 @@ local function update()
         return
     end
 
-    local PredictedPosition, TimeToGoal = predictGoalInterception(Ball, Goal)
+    local PredictedPosition, TimeToGoal =
+        predictGoalInterception(Ball, Goal)
 
     if not PredictedPosition then
         reposition(Root, Goal)
         return
     end
 
-    local Target = getGoalkeeperTarget(Goal, PredictedPosition, Root)
+    local Target = getGoalkeeperTarget(
+        Goal,
+        PredictedPosition,
+        Root
+    )
 
-    -- Start moving toward the predicted interception point.
-    Humanoid:MoveTo(Target)
+    -- Move toward the predicted interception point.
+    moveTo(Target)
 
-    -- Dive when the interception point is close enough to be useful.
-    tryLeap(Root, Target)
+    -- Dive when the lateral interception point is close enough.
+    tryLeap(Root, Goal, Target)
 
-    -- Keep these values available while debugging from the executor.
     _G.AutoGKDebug = {
         Ball = Ball,
         Goal = Goal,
