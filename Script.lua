@@ -193,47 +193,43 @@ end
 
 local function getPlayerTrackingTarget(Goal, Player)
 	local GoalCFrame = Goal:GetPivot()
-	local LocalThreat = GoalCFrame:PointToObjectSpace(
-		Player.Character.HumanoidRootPart.Position
+	local GoalPosition = GoalCFrame.Position
+	local ThreatPosition = Player.Character.HumanoidRootPart.Position
+
+	local ToThreat = Vector3.new(
+		ThreatPosition.X - GoalPosition.X,
+		0,
+		ThreatPosition.Z - GoalPosition.Z
 	)
 
-	-- Position the GK to cover the shooter's available goal angles.
-	-- A very wide angle makes the far post harder to reach, so move
-	-- slightly forward to reduce the shot angle. A central shooter can
-	-- stay deeper because both sides of the goal are already covered.
-	local DistanceFromGoal = math.abs(LocalThreat.Z)
-	local DepthSign = LocalThreat.Z >= 0 and 1 or -1
+	local DistanceFromGoal = ToThreat.Magnitude
 
-	local BaseDepth = 7
+	if DistanceFromGoal < 0.1 then
+		return GoalPosition
+	end
+
+	local DirectionToThreat = ToThreat.Unit
+
+	-- Put the GK directly between the goal and the shooter.
+	-- This makes wide-angle threats pull the GK forward toward the
+	-- shooter instead of only changing a fixed goal-axis coordinate.
 	local AngleWidth = math.clamp(
-		math.abs(LocalThreat.X) / math.max(DistanceFromGoal, 1),
+		math.abs(GoalCFrame:PointToObjectSpace(ThreatPosition).X)
+			/ math.max(math.abs(GoalCFrame:PointToObjectSpace(ThreatPosition).Z), 1),
 		0,
-		1.2
+		1.5
 	)
 
-	-- Forward movement closes the shooting angle. Keep it conservative
-	-- so the GK does not abandon the goal line.
 	local Forward = math.clamp(
-		BaseDepth + AngleWidth * 6,
-		6,
-		13
+		8 + AngleWidth * 7,
+		8,
+		18
 	)
 
-	-- Match the GK laterally to the shooter's angle, but leave enough
-	-- room on the opposite side for a far-post shot.
-	local Lateral = LocalThreat.X * math.clamp(
-		Forward / math.max(DistanceFromGoal, 1),
-		0,
-		0.9
-	)
+	-- Never move farther forward than the shooter itself.
+	Forward = math.min(Forward, math.max(DistanceFromGoal - 2, 6))
 
-	Lateral = math.clamp(Lateral, -13, 13)
-
-	return GoalCFrame:PointToWorldSpace(Vector3.new(
-		Lateral,
-		0,
-		DepthSign * Forward
-	))
+	return GoalPosition + DirectionToThreat * Forward
 end
 
 local function getBallTrackingTarget(Goal, Ball)
