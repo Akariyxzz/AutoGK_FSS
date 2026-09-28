@@ -1665,17 +1665,21 @@ Correct value:
 
 The value 55 must NOT be used as the football trajectory gravity.
 
-## Reactive GK state machine
+## Reactive tracking rebuild
 
-The initial implementation only reacted after the predicted trajectory entered the goal interception box. This caused the GK to remain stationary until the shot was almost on the line and could fail to react appropriately to fast shots.
+The previous prediction-first implementation was replaced.
 
-The current implementation uses:
+The current implementation deliberately starts with continuous threat tracking:
 
-- Goal-plane interception timing instead of waiting for hitbox entry.
-- IDLE, POSITION, TRACK, READY, COMMIT, and POSSESSION states.
-- Conservative lateral shading toward the ball or attacking possessor.
-- A set position several studs in front of the goal.
-- Earlier movement for approaching shots.
-- Leap only during the closer COMMIT window.
+1. Find an opponent with HasBall.
+2. Associate the nearest active football with that player when possible.
+3. If nobody has HasBall, select a nearby moving active football.
+4. Recalculate the threat position every update.
+5. Move the GK toward a goal-relative tracking position based on that threat.
+6. Track the threat laterally strongly enough to produce visible movement.
+7. Apply only a limited depth adjustment so the GK does not chase the attacker out of position.
+8. Keep diving as a secondary behavior rather than making prediction the primary movement system.
 
-These are Auto GK heuristics, not confirmed game AI behavior.
+The current script intentionally does not depend on goal-plane prediction for basic movement. Prediction/save logic should be added only after continuous ball/player tracking is behaving correctly.
+
+The tracking system is an Auto GK heuristic, not confirmed game AI behavior.
