@@ -16,6 +16,8 @@ local MovementController
 local Leap
 local LastJumpAt = 0
 local LastDiveAt = 0
+local PendingDiveBall
+local PendingDiveStartedAt = 0
 
 local BALL_GRAVITY = 196.2
 local PREDICTION_MIN_TIME = 0.08
@@ -294,12 +296,62 @@ local function tryOverheadJump(Ball, Root, Humanoid, Now)
 	if Humanoid.FloorMaterial ~= Enum.Material.Air then
 		Humanoid:ChangeState(Enum.HumanoidStateType.Jumping)
 		LastJumpAt = Now
+		PendingDiveBall = Ball
+		PendingDiveStartedAt = Now
 	end
 
 	_G.AutoGKDebug.Jump = true
 	_G.AutoGKDebug.JumpBall = Ball
 	_G.AutoGKDebug.JumpPrediction = Predicted
 	_G.AutoGKDebug.JumpPredictionTime = PredictionTime
+
+	return true
+end
+
+local function tryPendingDive(Goal, Root, Humanoid, Now)
+	if not PendingDiveBall then
+		return false
+	end
+
+	local Ball = PendingDiveBall
+
+	if not Ball.Parent or Ball:GetAttribute("Enabled") ~= true then
+		PendingDiveBall = nil
+		return false
+	end
+
+	-- Wait until the GK has actually risen and is near the apex.
+	local VerticalVelocity = Root.AssemblyLinearVelocity.Y
+	local Elapsed = Now - PendingDiveStartedAt
+
+	if Elapsed < 0.12 or VerticalVelocity > 1 then
+		return false
+	end
+
+	PendingDiveBall = nil
+
+	if Now - LastDiveAt < 1.0 then
+		return false
+	end
+
+	local Predicted = predictBallPosition(Ball, 0.08)
+	local LocalBall = Root.CFrame:PointToObjectSpace(Predicted)
+
+	if math.abs(LocalBall.X) < 2 then
+		return false
+	end
+
+	if LocalBall.X < 0 then
+		Leap.Activate("Left")
+		_G.AutoGKDebug.Dive = "LEFT"
+	else
+		Leap.Activate("Right")
+		_G.AutoGKDebug.Dive = "RIGHT"
+	end
+
+	LastDiveAt = Now
+	_G.AutoGKDebug.DiveBall = Ball
+	_G.AutoGKDebug.DivePrediction = Predicted
 
 	return true
 end
@@ -343,6 +395,12 @@ local function update()
 	end
 
 	_G.AutoGKDebug.Dive = false
+
+	-- Finish an overhead save by diving at the apex of the jump.
+	if tryPendingDive(Goal, Root, Humanoid, Now) then
+		trackCamera(PendingDiveBall and PendingDiveBall.Position or Root.Position)
+		return
+	end
 
 	-- Dive for a dangerous loose ball before normal tracking.
 	if FreeBall and tryDive(Goal, FreeBall, Root, Now) then
