@@ -1527,65 +1527,82 @@ When modifying `Script.lua`:
 
 # 41. Current Auto GK design
 
-The current implementation uses explicit goalkeeper behavior states rather than treating the GK as a simple "move to the predicted goal point" bot.
+The current implementation uses continuous threat tracking with two movement sources:
 
-States currently used:
+1. An opponent ball carrier.
+2. A loose active football when nobody on the opposing team currently has possession.
 
-- IDLE: LocalPlayer is not currently acting as GK or required GK data is unavailable.
-- POSITION: No immediate scoring trajectory is detected; maintain a sensible central/set position.
-- TRACK: Track an attacker or approaching football and shade laterally toward the threat.
-- READY: A scoring trajectory exists with roughly 0.45–1.0 seconds until the goal plane.
-- COMMIT: A scoring trajectory is close, with roughly 0–0.45 seconds until the goal plane; move aggressively and allow a dive.
-- POSSESSION: LocalPlayer has HasBall == true; interception behavior stops.
+The important distinction is that **loose-ball tracking is allowed, but loose-ball chasing is not**.
 
-Positioning behavior:
+## Opponent has the ball
 
-- The GK's set position is several studs in front of the goal line.
-- When tracking, the GK moves only a fraction of the ball/attacker's lateral displacement.
-- This prevents a distant attacker from dragging the GK all the way sideways.
-- The GK can begin moving before a shot reaches the goal.
-- Fast shots are evaluated using their time to the goal plane rather than waiting for a hitbox intersection.
-- If there is no ball, the GK returns toward the set position instead of using the old goal-center depth behavior.
+When an opponent has:
 
-Main flow:
+\`\`\`lua
+Player:GetAttribute("HasBall") == true
+\`\`\`
 
+the GK tracks that player.
+
+The target uses:
+
+- limited lateral movement toward the attacker;
+- limited depth adjustment;
+- a goalkeeper set position several studs in front of the goal.
+
+This prevents the attacker from dragging the GK too far out of position.
+
+## Ball is loose
+
+When there is no opponent ball carrier, the nearest active non-possessed football can become the tracking source.
+
+The GK uses a short predicted ball position based on the football's live velocity and the documented gravity approximation.
+
+The ball's local position relative to the own goal is then converted into a goalkeeper movement target.
+
+Loose-ball tracking is constrained:
+
+- lateral target is clamped to approximately `-12` to `12` studs in goal-local X;
+- depth is clamped to approximately `6` to `11` studs in front of the goal;
+- therefore a ball far upfield cannot make the GK run toward the ball;
+- the GK can still move laterally across the goal mouth to follow the ball.
+
+## Overhead ball
+
+A nearby rising loose ball can trigger the existing overhead jump detector.
+
+The ball used for jump detection does not bypass the goalkeeper positioning constraints and does not directly become the `Humanoid:MoveTo()` target.
+
+## Main flow
+
+\`\`\`
 LocalPlayer
   |
   +-- TeamPosition == GK?
   |
-  +-- own Goal -> InterceptionHitbox
-  |
   +-- LocalPlayer HasBall?
   |     |
-  |     +-- yes -> POSSESSION
+  |     +-- yes -> stop interception movement
   |
-  +-- opponent HasBall / active football
+  +-- own Goal
+  |
+  +-- opponent HasBall?
+  |     |
+  |     +-- yes -> track opponent
+  |
+  +-- loose active football
         |
-        +-- direct goal-plane trajectory?
+        +-- nearby overhead trajectory?
         |     |
-        |     +-- yes -> TRACK / READY / COMMIT
-        |            |
-        |            +-- MoveTo predicted lateral position
-        |            |
-        |            +-- Leap when close enough
+        |     +-- jump
         |
-        +-- no -> TRACK / POSITION
-               |
-               +-- shade toward ball/possessor
-               |
-               +-- remain centered and in front of goal
+        +-- otherwise -> track loose ball laterally
+                         while clamping goalkeeper depth
+\`\`\`
 
-Fallback when nobody has HasBall == true:
+The current script therefore does **not** use the football only for jump detection. A loose football is also a movement threat when there is no opponent carrier.
 
-workspace.Misc
-  |
-  +-- active Football BaseParts
-        |
-        +-- AssemblyLinearVelocity
-              |
-              +-- moving toward own goal?
-                    |
-                    +-- goal-plane prediction
+This is an implementation heuristic, not confirmed game AI behavior.
 
 # 42. Debugging
 
@@ -1667,19 +1684,29 @@ The value 55 must NOT be used as the football trajectory gravity.
 
 ## Reactive tracking rebuild
 
-The previous prediction-first implementation was replaced.
+The previous prediction-first implementation was replaced with continuous threat tracking.
 
-The current implementation deliberately starts with continuous threat tracking:
+The tracking system:
 
-1. Find an opponent with HasBall.
-2. Associate the nearest active football with that player when possible.
-3. If nobody has HasBall, select a nearby moving active football.
-4. Recalculate the threat position every update.
-5. Move the GK toward a goal-relative tracking position based on that threat.
-6. Track the threat laterally strongly enough to produce visible movement.
-7. Apply only a limited depth adjustment so the GK does not chase the attacker out of position.
-8. Keep diving as a secondary behavior rather than making prediction the primary movement system.
-
-The current script intentionally does not depend on goal-plane prediction for basic movement. Prediction/save logic should be added only after continuous ball/player tracking is behaving correctly.
+1. Finds an opponent with `HasBall`.
+2. If an opponent has the ball, tracks the opponent.
+3. If nobody has the ball, finds a nearby active loose football.
+4. Uses a short predicted ball position for loose-ball tracking.
+5. Tracks loose balls laterally across the goal mouth.
+6. Clamps loose-ball tracking depth so the GK does not chase a distant football upfield.
+7. Keeps overhead jump detection as a separate vertical reaction.
+8. Uses the existing goalkeeper character and `Humanoid:MoveTo()` for movement.
 
 The tracking system is an Auto GK heuristic, not confirmed game AI behavior.
+
+## Loose-ball tracking restoration
+
+The loose-ball movement source was temporarily removed too aggressively.
+
+The current implementation restores it with a goalkeeper-area constraint:
+
+- Opponent carrier takes priority when possession is known.
+- A free football is used as the movement source only when there is no opponent carrier.
+- Ball-local lateral movement is clamped.
+- Ball-local depth is clamped to the goalkeeper's useful positioning range.
+- The GK can therefore follow a loose ball without running directly toward it from far upfield.
