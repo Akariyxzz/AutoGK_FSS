@@ -1,8 +1,8 @@
 -- Auto GK for FSS
 -- Phase 1: tracking only.
 --
--- No saves, dives, prediction, sprint control, or ball trajectory logic.
--- The goalkeeper first needs to continuously track the active attacker/ball.
+-- No saves, dives, prediction, or ball trajectory logic.
+-- The goalkeeper continuously tracks the active football/attacker.
 
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
