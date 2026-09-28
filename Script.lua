@@ -102,20 +102,11 @@ local function getThreat()
 		return
 	end
 
-	-- Ball comes first. The GK should react to where the football
-	-- actually is rather than locking onto a player.
-	local Ball = getNearestBall(MyRoot.Position)
+	-- A possessed football is hidden underground, so its Position is
+	-- deliberately not used as the threat position. In that state,
+	-- track the opponent who actually possesses it.
+	local PossessingPlayer
 
-	if Ball then
-		return {
-			Ball = Ball,
-			Position = Ball.Position,
-			Type = "BALL",
-		}
-	end
-
-	-- If there is no active football, fall back to the opponent
-	-- currently controlling the play.
 	for _, Player in Players:GetPlayers() do
 		if Player ~= LocalPlayer
 			and Player:GetAttribute("IsOnPitch") == true
@@ -125,12 +116,45 @@ local function getThreat()
 			local Root = getRoot(Player)
 
 			if Root then
-				return {
-					Player = Player,
-					Position = Root.Position,
-					Type = "PLAYER",
-				}
+				PossessingPlayer = Player
+				break
 			end
+		end
+	end
+
+	-- Prefer a genuinely free football. Possessed footballs are ignored.
+	local BestBall
+	local BestDistance = math.huge
+
+	for _, Ball in getActiveBalls() do
+		if Ball:GetAttribute("State") ~= "Possessed" then
+			local Distance = (Ball.Position - MyRoot.Position).Magnitude
+
+			if Distance < BestDistance then
+				BestDistance = Distance
+				BestBall = Ball
+			end
+		end
+	end
+
+	if BestBall then
+		return {
+			Ball = BestBall,
+			Position = BestBall.Position,
+			Type = "BALL",
+		}
+	end
+
+	-- No free football: if somebody possesses it, use their position.
+	if PossessingPlayer then
+		local Root = getRoot(PossessingPlayer)
+
+		if Root then
+			return {
+			Player = PossessingPlayer,
+			Position = Root.Position,
+			Type = "PLAYER",
+		}
 		end
 	end
 end
