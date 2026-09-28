@@ -18,6 +18,7 @@ local LastJumpAt = 0
 local LastDiveAt = 0
 local PendingDiveBall
 local PendingDiveStartedAt = 0
+local LastOpponentCarrier
 
 local BALL_GRAVITY = 196.2
 local PREDICTION_MIN_TIME = 0.08
@@ -379,7 +380,31 @@ local function update()
 
 	local Now = os.clock()
 	local Opponent, OpponentRoot = getOpponentCarrier()
+
+	if Opponent and OpponentRoot then
+		LastOpponentCarrier = Opponent
+	end
+
 	local FreeBall = getNearestFreeBall(Root)
+
+	-- Ignore balls that have fallen below the playable area.
+	-- Keep tracking the opponent who last had possession instead.
+	if FreeBall and FreeBall.Position.Y < -9 then
+		FreeBall = nil
+	end
+
+	if not Opponent and LastOpponentCarrier then
+		local LastRoot = getRoot(LastOpponentCarrier)
+
+		if LastRoot
+			and LastOpponentCarrier:GetAttribute("IsOnPitch") == true
+			and LastOpponentCarrier:GetAttribute("IsHomeOrAway") ~= getSide() then
+			Opponent = LastOpponentCarrier
+			OpponentRoot = LastRoot
+		else
+			LastOpponentCarrier = nil
+		end
+	end
 
 	_G.AutoGKDebug = {
 		ThreatPlayer = Opponent,
