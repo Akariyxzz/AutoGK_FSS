@@ -8,10 +8,17 @@ local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
 local UserInputService = game:GetService("UserInputService")
 
+local Knit = require(game:GetService("ReplicatedStorage").Packages.Knit)
+
 local LocalPlayer = Players.LocalPlayer
 local Camera = workspace.CurrentCamera
 
 local Running = true
+local MovementController
+
+pcall(function()
+	MovementController = Knit.GetController("MovementController")
+end)
 
 local function getRoot(Player)
 	local Character = Player.Character
@@ -82,13 +89,6 @@ local function getNearestBall(Position)
 	return BestBall
 end
 
--- Threat priority:
--- 1. Opponent currently possessing the ball.
--- 2. Nearest active football.
---
--- We do not permanently follow the opponent. The selected threat itself
--- becomes the point the GK positions against.
-
 local function getThreat()
 	local MySide = getSide()
 
@@ -102,7 +102,20 @@ local function getThreat()
 		return
 	end
 
-	-- Player comes first because we know exactly who is controlling the play.
+	-- Ball comes first. The GK should react to where the football
+	-- actually is rather than locking onto a player.
+	local Ball = getNearestBall(MyRoot.Position)
+
+	if Ball then
+		return {
+			Ball = Ball,
+			Position = Ball.Position,
+			Type = "BALL",
+		}
+	end
+
+	-- If there is no active football, fall back to the opponent
+	-- currently controlling the play.
 	for _, Player in Players:GetPlayers() do
 		if Player ~= LocalPlayer
 			and Player:GetAttribute("IsOnPitch") == true
@@ -120,43 +133,26 @@ local function getThreat()
 			end
 		end
 	end
-
-	-- Nobody possesses it, so track the nearest active football instead.
-	local Ball = getNearestBall(MyRoot.Position)
-
-	if Ball then
-		return {
-			Ball = Ball,
-			Position = Ball.Position,
-			Type = "BALL",
-		}
-	end
 end
 
 local function getTrackingTarget(Goal, ThreatPosition, CurrentPosition)
 	local GoalCFrame = Goal:GetPivot()
 	local LocalThreat = GoalCFrame:PointToObjectSpace(ThreatPosition)
 
-	-- The GK follows the threat's side-to-side position.
-	-- Do not clamp this to the goal line; the GK is allowed to move
-	-- slightly out and toward the play.
+	-- Stay centered with the attacker's/ball's lateral position,
+	-- but never leave the useful goalkeeper area.
+	local Lateral = math.clamp(LocalThreat.X, -14, 14)
 
-	local Lateral = math.clamp(
-		LocalThreat.X,
-		-14,
-		14
-	)
-
-	-- Move forward when the threat is in front of the goal.
-	-- The further the threat is from the goal line, the more the GK
-	-- can step out, while still keeping a hard limit.
+	-- A real GK does not stand glued to the goal line. Step forward
+	-- toward the play, but become more conservative as the threat
+	-- gets farther away.
+	local DistanceFromGoal = math.abs(LocalThreat.Z)
 	local Forward = math.clamp(
-		math.abs(LocalThreat.Z) * 0.22,
-		0,
-		5
+		18 - DistanceFromGoal * 0.10,
+		3,
+		10
 	)
 
-	-- Point toward the threat along the goal's local depth axis.
 	local DepthSign = LocalThreat.Z >= 0 and 1 or -1
 
 	local LocalTarget = Vector3.new(
@@ -174,9 +170,9 @@ local function getTrackingTarget(Goal, ThreatPosition, CurrentPosition)
 	)
 end
 
-local function trackCamera(ThreatRoot)
+local function trackCamera(ThreatPosition)
 	local CameraPosition = Camera.CFrame.Position
-	local LookPosition = ThreatRoot.Position + Vector3.new(0, 1.5, 0)
+	local LookPosition = ThreatPosition + Vector3.new(0, 1.5, 0)
 
 	Camera.CFrame = CFrame.lookAt(
 		CameraPosition,
@@ -223,6 +219,14 @@ local function update()
 		Root.Position
 	)
 
+	local DistanceToTarget = (Target - Root.Position).Magnitude
+
+	-- Use the game's actual MovementController sprint state so the
+	-- goalkeeper can reposition quickly instead of slowly walking.
+	if MovementController then
+		MovementController:SetSprintingControlState(DistanceToTarget > 1.5)
+	end
+
 	Humanoid:MoveTo(Target)
 
 	_G.AutoGKDebug = {
@@ -231,10 +235,10 @@ local function update()
 		ThreatType = Threat.Type,
 		ThreatPosition = Threat.Position,
 		Target = Target,
+		DistanceToTarget = DistanceToTarget,
 	}
 
-	-- The camera follows whichever threat is currently selected:
-	-- the ball carrier or the football.
+	-- Keep the camera following the current threat.
 	trackCamera(Threat.Position)
 end
 
@@ -250,6 +254,11 @@ UserInputService.InputBegan:Connect(function(Input, GameProcessed)
 	end
 
 	Running = false
+
+	if MovementController then
+		MovementController:SetSprintingControlState(false)
+	end
+
 	_G.AutoGKDebug = nil
 
 	print("[AutoGK] stopped.")
