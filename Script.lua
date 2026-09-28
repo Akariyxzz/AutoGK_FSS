@@ -35,7 +35,7 @@ pcall(function()
     MovementController = Knit.GetController("MovementController")
 end)
 
-local GRAVITY = 55
+local GRAVITY = 196.1999969482422
 local PREDICTION_TIME = 2
 local PREDICTION_STEP = 1 / 30
 
