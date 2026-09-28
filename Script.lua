@@ -17,6 +17,7 @@
 
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local LocalPlayer = Players.LocalPlayer
@@ -46,6 +47,9 @@ local REPOSITION_DISTANCE = 2.5
 
 local lastMove = 0
 local lastDive = 0
+local debugLast = 0
+local running = true
+local HeartbeatConnection
 
 local function getCharacter()
     local Character = LocalPlayer.Character
@@ -420,6 +424,10 @@ local function isGoalkeeper()
 end
 
 local function update()
+    if not running then
+        return
+    end
+
     local Character, Humanoid, Root = getCharacter()
 
     if not Character or Humanoid.Health <= 0 then
@@ -476,7 +484,39 @@ local function update()
         PredictedPosition = PredictedPosition,
         TimeToGoal = TimeToGoal,
         Target = Target,
+        BallVelocity = Ball.AssemblyLinearVelocity,
+        BallState = Ball:GetAttribute("State"),
     }
+
+    -- Lightweight internal debugging. Throttled so Heartbeat does not spam output.
+    local now = os.clock()
+    if now - debugLast >= 1 then
+        debugLast = now
+        print(("[AutoGK] ball=%s state=%s t=%.2f target=%s"):format(
+            Ball.Name,
+            tostring(Ball:GetAttribute("State")),
+            TimeToGoal,
+            tostring(Target)
+        ))
+    end
 end
 
-RunService.Heartbeat:Connect(update)
+HeartbeatConnection = RunService.Heartbeat:Connect(update)
+
+UserInputService.InputBegan:Connect(function(Input, GameProcessed)
+    if GameProcessed or Input.KeyCode ~= Enum.KeyCode.K or not running then
+        return
+    end
+
+    running = false
+
+    if HeartbeatConnection then
+        HeartbeatConnection:Disconnect()
+        HeartbeatConnection = nil
+    end
+
+    stopSprint()
+    _G.AutoGKDebug = nil
+
+    print("[AutoGK] stopped.")
+end)
