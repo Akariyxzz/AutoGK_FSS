@@ -205,7 +205,7 @@ local function getPlayerTrackingTarget(Goal, Player)
 		0.9
 	)
 
-	Lateral = math.clamp(Lateral, -7, 7)
+	Lateral = math.clamp(Lateral, -13, 13)
 
 	return GoalCFrame:PointToWorldSpace(Vector3.new(
 		Lateral,
