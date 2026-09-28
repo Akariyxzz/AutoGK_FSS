@@ -1,8 +1,9 @@
 -- Auto GK for FSS
--- Phase 1: tracking only.
+-- Tracking + loose-ball recovery.
 --
--- No saves, dives, prediction, or ball trajectory logic.
--- The goalkeeper continuously tracks the active football/attacker.
+-- The goalkeeper tracks the opponent when they have possession, tracks free
+-- footballs directly, and can leave the line to recover a loose ball that
+-- has remained unpossessed for 3 seconds.
 
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
@@ -15,9 +16,19 @@ local Camera = workspace.CurrentCamera
 
 local Running = true
 local MovementController
+local Leap
+local LastDiveAt = 0
+
+local FreeBallSince = {}
 
 pcall(function()
 	MovementController = Knit.GetController("MovementController")
+end)
+
+pcall(function()
+	Leap = require(
+		Players.LocalPlayer.PlayerScripts.Client.Controllers.Actions.Managers.Leap
+	)
 end)
 
 local function getRoot(Player)
@@ -53,6 +64,53 @@ local function getGoal()
 	return Goal
 end
 
+local function getGoalkeeperArea()
+	local Side = getSide()
+
+	if Side ~= "Home" and Side ~= "Away" then
+		return
+	end
+
+	local Stadium = workspace:FindFirstChild("Stadium")
+	local Teams = Stadium and Stadium:FindFirstChild("Teams")
+	local Team = Teams and Teams:FindFirstChild(Side)
+	local Barriers = Team and Team:FindFirstChild("Barriers")
+	local Goalkeeper = Barriers and Barriers:FindFirstChild("Goalkeeper")
+
+	if not Goalkeeper then
+		return
+	end
+
+	return Goalkeeper
+end
+
+local function isPointInPart(Point, Part)
+	local LocalPoint = Part.CFrame:PointToObjectSpace(Point)
+	local HalfSize = Part.Size * 0.5
+
+	return math.abs(LocalPoint.X) <= HalfSize.X
+		and math.abs(LocalPoint.Y) <= HalfSize.Y
+		and math.abs(LocalPoint.Z) <= HalfSize.Z
+end
+
+local function isBallInGoalkeeperArea(Ball)
+	local Area = getGoalkeeperArea()
+
+	if not Area then
+		return false
+	end
+
+	for _, Object in Area:GetDescendants() do
+		if Object:IsA("BasePart") and Object.Name == "NoCharacter" then
+			if isPointInPart(Ball.Position, Object) then
+				return true
+			end
+		end
+	end
+
+	return false
+end
+
 local function getActiveBalls()
 	local Misc = workspace:FindFirstChild("Misc")
 
@@ -71,22 +129,6 @@ local function getActiveBalls()
 	end
 
 	return Balls
-end
-
-local function getNearestBall(Position)
-	local BestBall
-	local BestDistance = math.huge
-
-	for _, Ball in getActiveBalls() do
-		local Distance = (Ball.Position - Position).Magnitude
-
-		if Distance < BestDistance then
-			BestDistance = Distance
-			BestBall = Ball
-		end
-	end
-
-	return BestBall
 end
 
 local function getThreat()
@@ -151,28 +193,39 @@ local function getThreat()
 
 		if Root then
 			return {
-			Player = PossessingPlayer,
-			Position = Root.Position,
-			Type = "PLAYER",
-		}
+				Player = PossessingPlayer,
+				Position = Root.Position,
+				Type = "PLAYER",
+			}
 		end
 	end
 end
 
-local function getTrackingTarget(Goal, ThreatPosition, CurrentPosition)
+local function getTrackingTarget(Goal, Threat)
 	local GoalCFrame = Goal:GetPivot()
-	local LocalThreat = GoalCFrame:PointToObjectSpace(ThreatPosition)
+	local LocalThreat = GoalCFrame:PointToObjectSpace(Threat.Position)
 
-	-- Do not mirror the attacker's full lateral movement. The GK should
-	-- stay between the ball carrier and the center of the goal.
+	-- A free ball is the actual target. Do not reduce or offset its lateral
+	-- position: the GK should move directly to the ball.
+	if Threat.Type == "BALL" then
+		local WorldTarget = GoalCFrame:PointToWorldSpace(Vector3.new(
+			LocalThreat.X,
+			0,
+			LocalThreat.Z
+		))
+
+		return WorldTarget
+	end
+
+	-- When an opponent has the ball, only follow a small amount of their
+	-- lateral movement so they cannot drag the GK across most of the goal.
 	local Lateral = math.clamp(
-		LocalThreat.X * 0.70,
-		-10,
-		10
+		LocalThreat.X * 0.15,
+		-4,
+		4
 	)
 
-	-- Step noticeably in front of the goal line toward the play.
-	-- This keeps the GK active without letting it run too far out.
+	-- Stay somewhat off the line and toward the attacker.
 	local DistanceFromGoal = math.abs(LocalThreat.Z)
 	local Forward = math.clamp(
 		DistanceFromGoal * 0.30,
@@ -188,13 +241,7 @@ local function getTrackingTarget(Goal, ThreatPosition, CurrentPosition)
 		DepthSign * Forward
 	)
 
-	local WorldTarget = GoalCFrame:PointToWorldSpace(LocalTarget)
-
-	return Vector3.new(
-		WorldTarget.X,
-		CurrentPosition.Y,
-		WorldTarget.Z
-	)
+	return GoalCFrame:PointToWorldSpace(LocalTarget)
 end
 
 local function trackCamera(ThreatPosition)
@@ -205,6 +252,75 @@ local function trackCamera(ThreatPosition)
 		CameraPosition,
 		LookPosition
 	)
+end
+
+local function updateFreeBallTimers(Balls, Now)
+	local CurrentBalls = {}
+
+	for _, Ball in Balls do
+		CurrentBalls[Ball] = true
+
+		if Ball:GetAttribute("State") == "Possessed" then
+			FreeBallSince[Ball] = nil
+		elseif not FreeBallSince[Ball] then
+			FreeBallSince[Ball] = Now
+		end
+	end
+
+	for Ball in pairs(FreeBallSince) do
+		if not CurrentBalls[Ball] then
+			FreeBallSince[Ball] = nil
+		end
+	end
+end
+
+local function tryLooseBallRecovery(Threat, Root, Humanoid, Now)
+	if Threat.Type ~= "BALL" or not Threat.Ball then
+		return false
+	end
+
+	local Ball = Threat.Ball
+	local FreeSince = FreeBallSince[Ball]
+
+	if not FreeSince or Now - FreeSince < 3 then
+		return false
+	end
+
+	if not isBallInGoalkeeperArea(Ball) then
+		return false
+	end
+
+	-- Run directly to the loose ball.
+	local BallPosition = Ball.Position
+	Humanoid:MoveTo(Vector3.new(
+		BallPosition.X,
+		Root.Position.Y,
+		BallPosition.Z
+	))
+
+	-- Once close enough, use the game's actual forward Leap action to dive
+	-- toward the ball. The Leap manager handles its own action cooldown.
+	local Distance = (BallPosition - Root.Position).Magnitude
+
+	if Distance <= 12
+		and Now - LastDiveAt >= 1.25
+		and Leap then
+		Leap.Activate()
+		LastDiveAt = Now
+	end
+
+	-- Also allow a normal jump when the ball is above the GK's body. This
+	-- gives the goalkeeper a way to reach elevated loose balls.
+	if BallPosition.Y - Root.Position.Y > 1.5
+		and Distance <= 10
+		and Humanoid.FloorMaterial ~= Enum.Material.Air then
+		Humanoid:ChangeState(Enum.HumanoidStateType.Jumping)
+	end
+
+	_G.AutoGKDebug.Recovery = true
+	_G.AutoGKDebug.FreeFor = Now - FreeSince
+
+	return true
 end
 
 local function update()
@@ -228,6 +344,11 @@ local function update()
 		return
 	end
 
+	local Now = os.clock()
+	local Balls = getActiveBalls()
+
+	updateFreeBallTimers(Balls, Now)
+
 	local Threat = getThreat()
 
 	if not Threat then
@@ -240,32 +361,38 @@ local function update()
 		return
 	end
 
-	local Target = getTrackingTarget(
-		Goal,
-		Threat.Position,
-		Root.Position
+	_G.AutoGKDebug = {
+		ThreatPlayer = Threat.Player,
+		ThreatBall = Threat.Ball,
+		ThreatType = Threat.Type,
+		ThreatPosition = Threat.Position,
+		Recovery = false,
+	}
+
+	if tryLooseBallRecovery(Threat, Root, Humanoid, Now) then
+		trackCamera(Threat.Position)
+		return
+	end
+
+	local Target = getTrackingTarget(Goal, Threat)
+
+	Target = Vector3.new(
+		Target.X,
+		Root.Position.Y,
+		Target.Z
 	)
 
 	local DistanceToTarget = (Target - Root.Position).Magnitude
 
-	-- Use the game's actual MovementController sprint state so the
-	-- goalkeeper can reposition quickly instead of slowly walking.
 	if MovementController then
 		MovementController:SetSprintingControlState(DistanceToTarget > 1.5)
 	end
 
 	Humanoid:MoveTo(Target)
 
-	_G.AutoGKDebug = {
-		ThreatPlayer = Threat.Player,
-		ThreatBall = Threat.Ball,
-		ThreatType = Threat.Type,
-		ThreatPosition = Threat.Position,
-		Target = Target,
-		DistanceToTarget = DistanceToTarget,
-	}
+	_G.AutoGKDebug.Target = Target
+	_G.AutoGKDebug.DistanceToTarget = DistanceToTarget
 
-	-- Keep the camera following the current threat.
 	trackCamera(Threat.Position)
 end
 
