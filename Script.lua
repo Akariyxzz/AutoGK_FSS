@@ -175,20 +175,32 @@ local function getPlayerTrackingTarget(Goal, Player)
 		Player.Character.HumanoidRootPart.Position
 	)
 
-	local Lateral = math.clamp(
-		LocalThreat.X * 0.15,
-		-4,
-		4
-	)
-
+	-- Position the GK along the shooter's line to the center of the goal.
+	-- This gives the GK more coverage against the angles available to the
+	-- current ball carrier instead of always sitting at a fixed lateral offset.
 	local DistanceFromGoal = math.abs(LocalThreat.Z)
-	local Forward = math.clamp(
-		DistanceFromGoal * 0.30,
-		6,
-		11
+	local DepthSign = LocalThreat.Z >= 0 and 1 or -1
+	local GoalDepth = DepthSign * 7
+
+	local DepthDifference = math.max(DistanceFromGoal - math.abs(GoalDepth), 0)
+	local AngleScale = math.clamp(
+		math.abs(GoalDepth) / math.max(DistanceFromGoal, 0.01),
+		0,
+		1
 	)
 
-	local DepthSign = LocalThreat.Z >= 0 and 1 or -1
+	local Lateral = LocalThreat.X * AngleScale
+
+	-- Keep the GK inside a useful part of the goal mouth.
+	Lateral = math.clamp(Lateral, -8, 8)
+
+	-- If the shooter is close to the goal, don't let the angular
+	-- calculation pull the GK too far forward.
+	local Forward = math.clamp(
+		DepthDifference * 0.12 + 7,
+		6,
+		10
+	)
 
 	return GoalCFrame:PointToWorldSpace(Vector3.new(
 		Lateral,
