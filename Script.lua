@@ -135,30 +135,34 @@ end
 
 local function getTrackingTarget(Goal, ThreatPosition, CurrentPosition)
 	local GoalCFrame = Goal:GetPivot()
-
-	-- Convert the attacker into the goal's local space.
-	-- X is the side-to-side position of the threat relative to the goal.
 	local LocalThreat = GoalCFrame:PointToObjectSpace(ThreatPosition)
 
-	-- Track the attacker's lateral position, but stay inside the goal area.
+	-- The GK follows the threat's side-to-side position.
+	-- Do not clamp this to the goal line; the GK is allowed to move
+	-- slightly out and toward the play.
+
 	local Lateral = math.clamp(
 		LocalThreat.X,
 		-14,
 		14
 	)
 
-	-- Step forward a little as the attacker approaches.
-	-- This is deliberately small; we are not trying to save the shot yet.
-	local Depth = math.clamp(
-		LocalThreat.Z * 0.12,
-		-3,
-		3
+	-- Move forward when the threat is in front of the goal.
+	-- The further the threat is from the goal line, the more the GK
+	-- can step out, while still keeping a hard limit.
+	local Forward = math.clamp(
+		math.abs(LocalThreat.Z) * 0.22,
+		0,
+		5
 	)
+
+	-- Point toward the threat along the goal's local depth axis.
+	local DepthSign = LocalThreat.Z >= 0 and 1 or -1
 
 	local LocalTarget = Vector3.new(
 		Lateral,
 		0,
-		Depth
+		DepthSign * Forward
 	)
 
 	local WorldTarget = GoalCFrame:PointToWorldSpace(LocalTarget)
