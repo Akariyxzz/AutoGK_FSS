@@ -23,12 +23,12 @@ local LOW_BALL_Y = -230
 
 local BALL_GRAVITY = 196.2
 local PREDICTION_MIN_TIME = 0.08
-local PREDICTION_MAX_TIME = 0.55
-local PREDICTION_STEP = 0.05
+local PREDICTION_MAX_TIME = 0.8
+local PREDICTION_STEP = 0.03
 
 local OVERHEAD_MIN_HEIGHT = 1.5
-local OVERHEAD_MAX_HEIGHT = 7
-local OVERHEAD_RADIUS = 5
+local OVERHEAD_MAX_HEIGHT = 10
+local OVERHEAD_RADIUS = 9
 
 pcall(function()
 	MovementController = Knit.GetController("MovementController")
@@ -145,10 +145,8 @@ end
 local function getOverheadPrediction(Ball, Root)
 	local Velocity = Ball.AssemblyLinearVelocity
 
-	if Velocity.Y <= 8 then
-		return
-	end
-
+	-- Do not require the ball to still be rising. A shot can already be
+	-- descending by the time it enters the GK's interception range.
 	for Time = PREDICTION_MIN_TIME, PREDICTION_MAX_TIME, PREDICTION_STEP do
 		local Predicted = predictBallPosition(Ball, Time)
 		local Height = Predicted.Y - Root.Position.Y
@@ -162,9 +160,33 @@ local function getOverheadPrediction(Ball, Root)
 				Predicted.Z - Root.Position.Z
 			)
 
+			-- Use a much wider interception radius so shots coming toward
+			-- either side of the GK are detected before they pass.
 			if Horizontal.Magnitude <= OVERHEAD_RADIUS then
 				return Predicted, Time
 			end
+		end
+	end
+
+	-- Extra safety check for a ball that is already high and moving
+	-- toward the GK. This catches fast cross-goal shots between samples.
+	local CurrentHeight = Ball.Position.Y - Root.Position.Y
+	local HorizontalVelocity = Vector3.new(Velocity.X, 0, Velocity.Z)
+	local ToGK = Vector3.new(
+		Root.Position.X - Ball.Position.X,
+		0,
+		Root.Position.Z - Ball.Position.Z
+	)
+
+	if CurrentHeight >= OVERHEAD_MIN_HEIGHT
+		and CurrentHeight <= OVERHEAD_MAX_HEIGHT
+		and HorizontalVelocity.Magnitude > 1
+		and ToGK.Magnitude <= OVERHEAD_RADIUS * 1.5 then
+
+		local TowardGK = HorizontalVelocity.Unit:Dot(ToGK.Unit)
+
+		if TowardGK > 0.15 then
+			return Ball.Position, 0
 		end
 	end
 end
@@ -308,7 +330,7 @@ local function tryOverheadJump(Ball, Root, Humanoid, Now)
 		return false
 	end
 
-	if Now - LastJumpAt < 0.75 then
+	if Now - LastJumpAt < 0.55 then
 		return true
 	end
 
