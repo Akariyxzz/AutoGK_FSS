@@ -3,6 +3,7 @@
 ## Unreleased
 
 ### Added
+- Added `L` as a runtime kill switch that stops the Auto GK heartbeat logic.
 - Added detailed runtime debug output for GK detection, character state, goal resolution, carrier detection, target selection, and movement.
 - Fixed goal resolution to use the goal's `InterceptionHitbox`/`Hitbox` when `Goal` is a Model rather than a BasePart.
 - Added the first working `Script.lua` implementation for Phase 1.
