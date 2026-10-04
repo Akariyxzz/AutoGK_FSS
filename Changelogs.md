@@ -3,6 +3,9 @@
 ## Unreleased
 
 ### Added
+- Added camera-aware side selection for close recovery leaps.
+- Added slow-ball recovery: when a loose ball is slow, within chase range, and no opponent is nearby, the GK sprints directly toward it and can leap when close.
+- Added nearby-opponent protection so the GK does not blindly chase a contested loose ball.
 - Expanded `Script.lua` beyond basic positioning with active football discovery, live-velocity ballistic prediction, controlled loose-ball tracking, overhead jump detection, apex lateral dives, and dangerous ground-ball dives.
 - Added MovementController sprint support when repositioning.
 - Kept the `L` runtime kill switch and debug diagnostics.
