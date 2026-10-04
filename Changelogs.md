@@ -3,6 +3,7 @@
 ## Unreleased
 
 ### Added
+- Improved defensive lateral positioning so the GK shades toward the attacking threat instead of staying fixed at the exact center; camera direction is used as a secondary tracking bias.
 - Added camera-aware side selection for close recovery leaps.
 - Added slow-ball recovery: when a loose ball is slow, within chase range, and no opponent is nearby, the GK sprints directly toward it and can leap when close.
 - Added nearby-opponent protection so the GK does not blindly chase a contested loose ball.
