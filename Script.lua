@@ -202,6 +202,50 @@ local function GetThreatLateral(Goal, Player)
     )
 end
 
+local function GetCameraLateralBias(Goal, Root)
+    local Camera = workspace.CurrentCamera
+
+    if not Camera then
+        return 0
+    end
+
+    local CameraLocal = Goal.CFrame:PointToObjectSpace(
+        Camera.CFrame.Position
+    )
+
+    local CameraLook = Goal.CFrame:VectorToObjectSpace(
+        Camera.CFrame.LookVector
+    )
+
+    if math.abs(CameraLook.Z) < 0.05 then
+        return math.clamp(CameraLocal.X, -GOAL_LATERAL_LIMIT, GOAL_LATERAL_LIMIT)
+    end
+
+    local GoalPlaneX = CameraLocal.X - CameraLook.X
+        * (CameraLocal.Z / CameraLook.Z)
+
+    return math.clamp(
+        GoalPlaneX,
+        -GOAL_LATERAL_LIMIT,
+        GOAL_LATERAL_LIMIT
+    )
+end
+
+local function GetDefensiveLateral(Goal, Root, ThreatLateral)
+    local CameraBias = GetCameraLateralBias(Goal, Root)
+
+    -- Keep the camera as a secondary tracking signal. The actual threat
+    -- remains dominant so looking toward the center does not pull the GK
+    -- away from an attacker/ball on the opposite side.
+    local Lateral = ThreatLateral * 0.75 + CameraBias * 0.25
+
+    return math.clamp(
+        Lateral,
+        -GOAL_LATERAL_LIMIT,
+        GOAL_LATERAL_LIMIT
+    )
+end
+
 local function GetGoalDepthSign(Goal, Root)
     local LocalRoot = Goal.CFrame:PointToObjectSpace(Root.Position)
 
@@ -593,7 +637,8 @@ local function Update()
     end
 
     if Carrier and CarrierRoot then
-        local Lateral = GetThreatLateral(Goal, Carrier)
+        local ThreatLateral = GetThreatLateral(Goal, Carrier)
+        local Lateral = GetDefensiveLateral(Goal, Root, ThreatLateral)
         local LocalCarrier = Goal.CFrame:PointToObjectSpace(CarrierRoot.Position)
 
         Debug("Threat", string.format(
@@ -626,10 +671,14 @@ local function Update()
         local Predicted = PredictBall(FreeBall, 0.12)
         local LocalBall = Goal.CFrame:PointToObjectSpace(Predicted)
 
-        local Lateral = math.clamp(
-            LocalBall.X,
-            -GOAL_LATERAL_LIMIT,
-            GOAL_LATERAL_LIMIT
+        local Lateral = GetDefensiveLateral(
+            Goal,
+            Root,
+            math.clamp(
+                LocalBall.X,
+                -GOAL_LATERAL_LIMIT,
+                GOAL_LATERAL_LIMIT
+            )
         )
 
         local Depth = math.clamp(
@@ -655,8 +704,17 @@ local function Update()
         return
     end
 
-    Debug("Threat", "None; returning center")
-    MoveToGoalTarget(Humanoid, Root, Goal, 0, 7)
+    -- Do not immediately snap to the exact center. Use the camera's
+    -- current viewing direction as a weak positional bias while there
+    -- is no explicit carrier/ball threat.
+    local IdleLateral = GetDefensiveLateral(Goal, Root, 0)
+
+    Debug("Threat", string.format(
+        "None; defensive lateral=%.2f",
+        IdleLateral
+    ))
+
+    MoveToGoalTarget(Humanoid, Root, Goal, IdleLateral, 7)
 end
 
 UserInputService.InputBegan:Connect(function(Input, GameProcessed)
