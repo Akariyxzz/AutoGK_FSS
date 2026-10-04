@@ -14,19 +14,41 @@ local function vector3ToTable(value)
     }
 end
 
-local function getPlayerState()
-    local character = LocalPlayer.Character
+local function getCharacterState(player)
+    local character = player.Character
     local root = character and character:FindFirstChild("HumanoidRootPart")
 
     if not root then
         return nil
     end
 
+    local attributes = player:GetAttributes()
+
     return {
+        name = player.Name,
+        userId = player.UserId,
+        team = player.Team and player.Team.Name or nil,
         position = vector3ToTable(root.Position),
         velocity = vector3ToTable(root.AssemblyLinearVelocity),
-        team = LocalPlayer.Team and LocalPlayer.Team.Name or nil,
+        teamPosition = attributes.TeamPosition,
+        hasBall = attributes.HasBall == true,
+        isOnPitch = attributes.IsOnPitch == true,
+        isHomeOrAway = attributes.IsHomeOrAway,
     }
+end
+
+local function getPlayersState()
+    local result = {}
+
+    for _, player in ipairs(Players:GetPlayers()) do
+        local state = getCharacterState(player)
+
+        if state then
+            table.insert(result, state)
+        end
+    end
+
+    return result
 end
 
 Socket.OnMessage:Connect(function(message)
@@ -53,7 +75,8 @@ local function sendState()
     send({
         type = "state",
         timestamp = os.clock(),
-        player = getPlayerState(),
+        self = getCharacterState(LocalPlayer),
+        players = getPlayersState(),
     })
 end
 
