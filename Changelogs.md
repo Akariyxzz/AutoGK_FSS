@@ -31,3 +31,6 @@
 - Rebuilt `Script.lua` from the `Old.lua` baseline with goalkeeper behavior: goal-local positioning, camera-view tracking, threat/ball prioritization, live trajectory checks, slow uncontested-ball recovery, controlled depth, and debug state. Camera tracking is read-only and no longer overwrites `CurrentCamera.CFrame`.
 
 - Fixed the Old.lua-based rebuild: corrected the predictBallPosition local-scope bug, made dangerous-shot detection use actual goal-plane crossing time, fixed overhead-jump cooldown logic, prioritized pending apex dives correctly, removed unused threat-ball selection code, and initialized persistent debug state before action handlers use it.
+
+- Added initial AI telemetry to `Script.lua`: player/ball/self state snapshots, controlled-ball substitution when a player owns the ball, camera/goal context, current action labels, and resilient `DisplayPointsGain` reward capture across `__GamemodeComm` recreation.
+- Added `Script.py` as the first training-side baseline: JSONL loading, observation discretization, action/reward statistics, and a tabular policy export. This is intentionally a data/validation stage before a full RL algorithm.
