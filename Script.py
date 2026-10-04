@@ -34,18 +34,30 @@ def on_message(client, _server, message):
         print("[WS] invalid JSON")
         return
 
+    if packet.get("type") == "hello":
+        print(f"[WS] protocol hello from client {client['id']}")
+        return
+
     if packet.get("type") != "state":
         return
 
+    player = packet.get("player")
+
+    print("\nSTATE RECEIVED")
+    print(json.dumps(player, indent=2))
+
     record = {
         "timestamp": packet.get("timestamp", time.time()),
-        "state": packet.get("state", {}),
+        "player": player,
     }
 
     with DATA_FILE.open("a", encoding="utf-8") as file:
         file.write(json.dumps(record, separators=(",", ":")) + "\n")
 
-    send_json(client, {"type": "action", "action": "HOLD"})
+    send_json(client, {
+        "type": "action",
+        "action": "HOLD",
+    })
 
 
 server = WebsocketServer(host=HOST, port=PORT, loglevel=0)
