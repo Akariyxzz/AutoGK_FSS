@@ -25,3 +25,5 @@
 - Significant future changes to `Script.lua` should be reflected here.
 
 - Removed the previous `Script.lua` implementation; future Auto GK development will restart from `Old.lua` as the codebase baseline.
+
+- Recreated `Script.lua` as an exact baseline copy of `Old.lua`; future implementation work will be built from this baseline.
