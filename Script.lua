@@ -36,6 +36,10 @@ local OVERHEAD_MAX_HEIGHT = 10
 local OVERHEAD_RADIUS = 9
 
 local GOAL_LATERAL_LIMIT = 12
+local SLOW_BALL_SPEED = 35
+local SLOW_BALL_CHASE_RADIUS = 55
+local SLOW_BALL_LEAP_DISTANCE = 8
+local NEAR_BALL_PLAYER_RADIUS = 12
 local GOAL_MIN_DEPTH = 6
 local GOAL_MAX_DEPTH = 11
 local MOVE_THRESHOLD = 1.25
@@ -241,6 +245,100 @@ local function MoveToGoalTarget(Humanoid, Root, Goal, Lateral, Depth)
     end
 
     Humanoid:MoveTo(Target)
+end
+
+local function GetNearestOpponentDistance(Position)
+    local BestDistance = math.huge
+
+    for _, Player in Players:GetPlayers() do
+        if IsOpponent(Player) then
+            local _, _, Root = GetCharacter(Player)
+
+            if Root then
+                local Distance = (Root.Position - Position).Magnitude
+
+                if Distance < BestDistance then
+                    BestDistance = Distance
+                end
+            end
+        end
+    end
+
+    return BestDistance
+end
+
+local function IsSlowUncontestedBall(Ball, BallDistance)
+    if not Ball or BallDistance > SLOW_BALL_CHASE_RADIUS then
+        return false
+    end
+
+    local Speed = Ball.AssemblyLinearVelocity.Magnitude
+
+    if Speed > SLOW_BALL_SPEED then
+        return false
+    end
+
+    local NearestOpponent = GetNearestOpponentDistance(Ball.Position)
+
+    Debug("LooseBall", string.format(
+        "speed=%.1f nearest opponent=%.1f",
+        Speed,
+        NearestOpponent
+    ))
+
+    return NearestOpponent > NEAR_BALL_PLAYER_RADIUS
+end
+
+local function ChaseSlowBall(Ball, BallDistance, Root, Humanoid)
+    if not IsSlowUncontestedBall(Ball, BallDistance) then
+        return false
+    end
+
+    local Target = Vector3.new(
+        Ball.Position.X,
+        Root.Position.Y,
+        Ball.Position.Z
+    )
+
+    Debug("Chase", string.format(
+        "slow uncontested ball distance=%.1f",
+        BallDistance
+    ))
+
+    if BallDistance <= SLOW_BALL_LEAP_DISTANCE and Leap then
+        local Camera = workspace.CurrentCamera
+
+        if Camera then
+            local CameraRight = Camera.CFrame.RightVector
+            local ToBall = Ball.Position - Camera.CFrame.Position
+            local ScreenSide = CameraRight:Dot(ToBall)
+
+            if math.abs(ScreenSide) > 1 then
+                if ScreenSide < 0 then
+                    Leap.Activate("Left")
+                    Debug("ChaseLeap", "LEFT based on camera")
+                else
+                    Leap.Activate("Right")
+                    Debug("ChaseLeap", "RIGHT based on camera")
+                end
+
+                LastDiveAt = os.clock()
+                return true
+            end
+        end
+
+        Leap.Activate()
+        Debug("ChaseLeap", "FORWARD")
+        LastDiveAt = os.clock()
+        return true
+    end
+
+    if MovementController then
+        MovementController:SetSprintingControlState(true)
+    end
+
+    Humanoid:MoveTo(Target)
+    return true
 end
 
 local function GetOverheadPrediction(Ball, Root)
@@ -471,6 +569,12 @@ local function Update()
         ))
     else
         Debug("Ball", "None")
+    end
+
+    -- A slow, uncontested loose ball is treated as a recoverable ball.
+    -- Chase it directly instead of forcing the GK to stay on the goal line.
+    if FreeBall and ChaseSlowBall(FreeBall, BallDistance, Root, Humanoid) then
+        return
     end
 
     -- A distant/harmless loose ball must not drag the GK out of goal.
