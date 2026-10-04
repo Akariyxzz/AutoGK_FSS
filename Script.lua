@@ -5,12 +5,14 @@
 
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local LocalPlayer = Players.LocalPlayer
 local Knit = require(ReplicatedStorage.Packages.Knit)
 
 local Running = true
+local DebugLast = {}
 local DEBUG = true
 local DebugLast = {}
 
@@ -116,6 +118,15 @@ local function StopMovement(Humanoid)
         Humanoid:MoveTo(Root.Position)
     end
 end
+
+UserInputService.InputBegan:Connect(function(Input, GameProcessed)
+    if GameProcessed then return end
+    if Input.KeyCode == Enum.KeyCode.L then
+        Running = false
+        Debug("Status", "Script stopped by L")
+        print("[AutoGK] Script stopped.")
+    end
+end)
 
 Debug("Loaded", "Script started for " .. LocalPlayer.Name)
 Debug("TeamPosition", LocalPlayer:GetAttribute("TeamPosition"))
