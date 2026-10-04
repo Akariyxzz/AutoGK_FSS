@@ -27,3 +27,5 @@
 - Removed the previous `Script.lua` implementation; future Auto GK development will restart from `Old.lua` as the codebase baseline.
 
 - Recreated `Script.lua` as an exact baseline copy of `Old.lua`; future implementation work will be built from this baseline.
+
+- Rebuilt `Script.lua` from the `Old.lua` baseline with goalkeeper behavior: goal-local positioning, camera-view tracking, threat/ball prioritization, live trajectory checks, slow uncontested-ball recovery, controlled depth, and debug state. Camera tracking is read-only and no longer overwrites `CurrentCamera.CFrame`.
