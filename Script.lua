@@ -246,6 +246,21 @@ local function GetDefensiveLateral(Goal, Root, ThreatLateral)
     )
 end
 
+local function GetCameraTargetLateral(Goal)
+    local Camera = workspace.CurrentCamera
+    if not Camera then return 0 end
+
+    local P = Goal.CFrame:PointToObjectSpace(Camera.CFrame.Position)
+    local D = Goal.CFrame:VectorToObjectSpace(Camera.CFrame.LookVector)
+
+    if math.abs(D.Z) < 0.05 then
+        return math.clamp(P.X, -GOAL_LATERAL_LIMIT, GOAL_LATERAL_LIMIT)
+    end
+
+    local T = -P.Z / D.Z
+    return math.clamp(P.X + D.X * T, -GOAL_LATERAL_LIMIT, GOAL_LATERAL_LIMIT)
+end
+
 local function GetGoalDepthSign(Goal, Root)
     local LocalRoot = Goal.CFrame:PointToObjectSpace(Root.Position)
 
@@ -638,7 +653,7 @@ local function Update()
 
     if Carrier and CarrierRoot then
         local ThreatLateral = GetThreatLateral(Goal, Carrier)
-        local Lateral = GetDefensiveLateral(Goal, Root, ThreatLateral)
+        local Lateral = GetCameraTargetLateral(Goal)
         local LocalCarrier = Goal.CFrame:PointToObjectSpace(CarrierRoot.Position)
 
         Debug("Threat", string.format(
@@ -671,15 +686,7 @@ local function Update()
         local Predicted = PredictBall(FreeBall, 0.12)
         local LocalBall = Goal.CFrame:PointToObjectSpace(Predicted)
 
-        local Lateral = GetDefensiveLateral(
-            Goal,
-            Root,
-            math.clamp(
-                LocalBall.X,
-                -GOAL_LATERAL_LIMIT,
-                GOAL_LATERAL_LIMIT
-            )
-        )
+        local Lateral = GetCameraTargetLateral(Goal)
 
         local Depth = math.clamp(
             math.abs(LocalBall.Z) * 0.15,
@@ -707,7 +714,7 @@ local function Update()
     -- Do not immediately snap to the exact center. Use the camera's
     -- current viewing direction as a weak positional bias while there
     -- is no explicit carrier/ball threat.
-    local IdleLateral = GetDefensiveLateral(Goal, Root, 0)
+    local IdleLateral = GetCameraTargetLateral(Goal)
 
     Debug("Threat", string.format(
         "None; defensive lateral=%.2f",
