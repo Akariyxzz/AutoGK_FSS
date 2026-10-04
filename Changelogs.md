@@ -3,6 +3,8 @@
 ## Unreleased
 
 ### Added
+- Added detailed runtime debug output for GK detection, character state, goal resolution, carrier detection, target selection, and movement.
+- Fixed goal resolution to use the goal's `InterceptionHitbox`/`Hitbox` when `Goal` is a Model rather than a BasePart.
 - Added the first working `Script.lua` implementation for Phase 1.
 - Added goalkeeper-role detection, own-goal resolution, centered goal positioning, carrier-based lateral tracking, possession protection, and reduced redundant movement calls.
 - Added `Behavior.md` as the behavioral specification for Auto GK.
