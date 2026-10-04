@@ -9,9 +9,18 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local LocalPlayer = Players.LocalPlayer
 local Knit = require(ReplicatedStorage.Packages.Knit)
-local MovementController = Knit.GetController("MovementController")
 
 local Running = true
+local DEBUG = true
+local DebugLast = {}
+
+local function Debug(Name, Value)
+    if not DEBUG then return end
+    local Text = tostring(Value)
+    if DebugLast[Name] == Text then return end
+    DebugLast[Name] = Text
+    print("[AutoGK][" .. Name .. "]", Text)
+end
 local LastOpponentCarrier = nil
 
 local GOAL_FORWARD_OFFSET = 7
@@ -20,7 +29,10 @@ local MOVE_THRESHOLD = 1.25
 
 local function GetCharacter()
     local Character = LocalPlayer.Character
-    if not Character then return end
+    if not Character then
+        Debug("Character", "Missing character/humanoid/root")
+        return
+    end
 
     local Humanoid = Character:FindFirstChildOfClass("Humanoid")
     local Root = Character:FindFirstChild("HumanoidRootPart")
@@ -71,6 +83,10 @@ local function GetThreatLateral(Goal, Player)
 end
 
 local function MoveToGoalPosition(Humanoid, Root, Goal, Lateral)
+    if not Goal:IsA("BasePart") then
+        Debug("Goal", "Goal is " .. Goal.ClassName .. "; expected BasePart")
+        return
+    end
     local TargetLateral = math.clamp(Lateral, -GOAL_LATERAL_LIMIT, GOAL_LATERAL_LIMIT)
     local Target = Goal.CFrame:PointToWorldSpace(
         Vector3.new(TargetLateral, 0, GOAL_FORWARD_OFFSET)
@@ -83,6 +99,7 @@ local function MoveToGoalPosition(Humanoid, Root, Goal, Lateral)
         return
     end
 
+    Debug("Move", string.format("Moving to %.2f, %.2f, %.2f", Target.X, Target.Y, Target.Z))
     Humanoid:MoveTo(Target)
 end
 
@@ -93,21 +110,39 @@ local function StopMovement(Humanoid)
     end
 end
 
+Debug("Loaded", "Script started for " .. LocalPlayer.Name)
+Debug("TeamPosition", LocalPlayer:GetAttribute("TeamPosition"))
+Debug("Side", LocalPlayer:GetAttribute("IsHomeOrAway"))
+
 RunService.Heartbeat:Connect(function()
-    if not Running or not IsGoalkeeper() then return end
+    if not Running then return end
+
+    if not IsGoalkeeper() then
+        Debug("Status", "Not GK; TeamPosition=" .. tostring(LocalPlayer:GetAttribute("TeamPosition")))
+        return
+    end
+    Debug("Status", "GK active")
 
     local Character, Humanoid, Root = GetCharacter()
     if not Character then return end
 
     if LocalPlayer:GetAttribute("HasBall") == true then
+        Debug("Status", "GK has ball; stopping movement")
         StopMovement(Humanoid)
         return
     end
 
     local Goal = GetOwnGoal()
-    if not Goal or not Goal:IsA("BasePart") then return end
+    if not Goal then
+        Debug("Goal", "Goal object not found")
+        return
+    end
+
+    Debug("Goal", Goal:GetFullName() .. " [" .. Goal.ClassName .. "]")
 
     local Carrier = GetOpponentCarrier()
+
+    Debug("Carrier", Carrier and Carrier.Name or "None")
 
     if Carrier then
         LastOpponentCarrier = Carrier
@@ -120,13 +155,16 @@ RunService.Heartbeat:Connect(function()
     end
 
     if Carrier then
+        local Lateral = GetThreatLateral(Goal, Carrier)
+        Debug("Target", "Carrier lateral = " .. string.format("%.2f", Lateral))
         MoveToGoalPosition(
             Humanoid,
             Root,
             Goal,
-            GetThreatLateral(Goal, Carrier)
+            Lateral
         )
     else
+        Debug("Target", "Center")
         MoveToGoalPosition(Humanoid, Root, Goal, 0)
     end
 end)
