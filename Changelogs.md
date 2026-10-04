@@ -3,6 +3,9 @@
 ## Unreleased
 
 ### Added
+- Expanded `Script.lua` beyond basic positioning with active football discovery, live-velocity ballistic prediction, controlled loose-ball tracking, overhead jump detection, apex lateral dives, and dangerous ground-ball dives.
+- Added MovementController sprint support when repositioning.
+- Kept the `L` runtime kill switch and debug diagnostics.
 - Added `L` as a runtime kill switch that stops the Auto GK heartbeat logic.
 - Added detailed runtime debug output for GK detection, character state, goal resolution, carrier detection, target selection, and movement.
 - Fixed goal resolution to use the goal's `InterceptionHitbox`/`Hitbox` when `Goal` is a Model rather than a BasePart.
