@@ -30,6 +30,7 @@ local OVERHEAD_MAX_HEIGHT = 10
 local OVERHEAD_RADIUS = 9
 
 local GOAL_LATERAL_LIMIT = 13
+local SAFE_LATERAL_LIMIT = 7
 local GOAL_MIN_DEPTH = 6
 local GOAL_MAX_DEPTH = 12
 local CAMERA_TRACK_WEIGHT = 0.65
@@ -214,13 +215,13 @@ local function getThreatLateral(Goal, Position)
 end
 
 local function getDefensiveLateral(Goal, Position)
-	local Threat = getThreatLateral(Goal, Position)
-	local CameraTarget = getCameraGoalLateral(Goal)
-
+	-- During an actual attacking threat, never let the camera pull the GK
+	-- away from the goal mouth. Camera tracking is only used when there is
+	-- no identified attacker/ball threat.
 	return math.clamp(
-		Threat * THREAT_TRACK_WEIGHT + CameraTarget * CAMERA_TRACK_WEIGHT,
-		-GOAL_LATERAL_LIMIT,
-		GOAL_LATERAL_LIMIT
+		getThreatLateral(Goal, Position) * THREAT_TRACK_WEIGHT,
+		-SAFE_LATERAL_LIMIT,
+		SAFE_LATERAL_LIMIT
 	)
 end
 
@@ -633,7 +634,11 @@ local function update()
 	else
 		-- No immediate threat: track the camera's view across the goal while
 		-- remaining at a safe depth instead of snapping to center.
-		local CameraLateral = getCameraGoalLateral(Goal)
+		local CameraLateral = math.clamp(
+			getCameraGoalLateral(Goal),
+			-SAFE_LATERAL_LIMIT,
+			SAFE_LATERAL_LIMIT
+		)
 		Target = getGoalTarget(Goal, Root, CameraLateral, 7)
 		debug("Threat", "NONE / CAMERA")
 	end
