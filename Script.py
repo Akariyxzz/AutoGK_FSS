@@ -41,18 +41,19 @@ def on_message(client, _server, message):
     if packet.get("type") != "state":
         return
 
-    player = packet.get("player")
-
-    print("\nSTATE RECEIVED")
-    print(json.dumps(player, indent=2))
-
     record = {
         "timestamp": packet.get("timestamp", time.time()),
-        "player": player,
+        "self": packet.get("self"),
+        "players": packet.get("players", []),
     }
 
     with DATA_FILE.open("a", encoding="utf-8") as file:
         file.write(json.dumps(record, separators=(",", ":")) + "\n")
+
+    print(
+        f"[STATE] players={len(record['players'])} "
+        f"self={record['self']}"
+    )
 
     send_json(client, {
         "type": "action",
