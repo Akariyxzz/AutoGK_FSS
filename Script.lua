@@ -5,6 +5,7 @@
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
 local UserInputService = game:GetService("UserInputService")
+local HttpService = game:GetService("HttpService")
 
 local Knit = require(game:GetService("ReplicatedStorage").Packages.Knit)
 
@@ -43,6 +44,222 @@ local MOVE_THRESHOLD = 1.0
 local DEBUG = true
 local DebugLast = {}
 _G.AutoGKDebug = {}
+
+-- Training telemetry. This does not make decisions; it records the
+-- information the future policy will be allowed to observe.
+local TELEMETRY_ENABLED = true
+local TELEMETRY_INTERVAL = 0.10
+local TELEMETRY_PATH = "AutoGK_FSS/episodes.jsonl"
+local LastTelemetryAt = 0
+local LastReward = 0
+local LastRewardName = nil
+local LastRewardAt = 0
+local CurrentAction = "NONE"
+local GMC
+local RewardConnection
+
+local function safeMakeTelemetryFolder()
+    if not TELEMETRY_ENABLED or not makefolder then
+        return
+    end
+
+    pcall(function()
+        if not isfolder or not isfolder("AutoGK_FSS") then
+            makefolder("AutoGK_FSS")
+        end
+    end)
+end
+
+local function setAction(Action)
+    CurrentAction = Action
+    _G.AutoGKDebug.Action = Action
+end
+
+local function serializeVector(Value)
+    if typeof(Value) ~= "Vector3" then
+        return nil
+    end
+
+    return {x = Value.X, y = Value.Y, z = Value.Z}
+end
+
+local function getStateSnapshot()
+    local Character = LocalPlayer.Character
+    local Root = Character and Character:FindFirstChild("HumanoidRootPart")
+    local Goal = getGoal()
+    local Side = getSide()
+
+    local Snapshot = {
+        t = os.clock(),
+        self = {
+            position = Root and serializeVector(Root.Position),
+            velocity = Root and serializeVector(Root.AssemblyLinearVelocity),
+            team = Side,
+            teamPosition = LocalPlayer:GetAttribute("TeamPosition"),
+            hasBall = LocalPlayer:GetAttribute("HasBall") == true,
+            isOnPitch = LocalPlayer:GetAttribute("IsOnPitch") == true,
+        },
+        camera = nil,
+        goal = nil,
+        balls = {},
+        players = {},
+        action = CurrentAction,
+        reward = LastReward,
+        rewardName = LastRewardName,
+    }
+
+    local Camera = workspace.CurrentCamera
+    if Camera then
+        Snapshot.camera = {
+            position = serializeVector(Camera.CFrame.Position),
+            lookVector = serializeVector(Camera.CFrame.LookVector),
+        }
+    end
+
+    if Goal then
+        local GoalPosition = Goal.Position
+        Snapshot.goal = {
+            position = serializeVector(GoalPosition),
+            size = serializeVector(Goal.Size),
+            localSelf = Root and serializeVector(Goal.CFrame:PointToObjectSpace(Root.Position)),
+            side = Side,
+        }
+    end
+
+    for _, Player in Players:GetPlayers() do
+        local PlayerRoot = getRoot(Player)
+        if PlayerRoot then
+            local PlayerSide = Player:GetAttribute("IsHomeOrAway")
+            local HasBall = Player:GetAttribute("HasBall") == true
+            Snapshot.players[#Snapshot.players + 1] = {
+                team = PlayerSide,
+                teamPosition = Player:GetAttribute("TeamPosition"),
+                hasBall = HasBall,
+                isOnPitch = Player:GetAttribute("IsOnPitch") == true,
+                position = serializeVector(PlayerRoot.Position),
+                velocity = serializeVector(PlayerRoot.AssemblyLinearVelocity),
+                lookVector = serializeVector(PlayerRoot.CFrame.LookVector),
+                distanceToSelf = Root and (PlayerRoot.Position - Root.Position).Magnitude,
+            }
+        end
+    end
+
+    -- A possessed football instance is intentionally NOT used as the
+    -- carrier's ball position. The game's physical ball can be underground.
+    local HasCarrier = false
+    for _, Player in Players:GetPlayers() do
+        if Player:GetAttribute("HasBall") == true then
+            local PlayerRoot = getRoot(Player)
+            if PlayerRoot then
+                HasCarrier = true
+                Snapshot.balls[#Snapshot.balls + 1] = {
+                    controlled = true,
+                    ownerTeam = Player:GetAttribute("IsHomeOrAway"),
+                    ownerTeamPosition = Player:GetAttribute("TeamPosition"),
+                    ownerHasBall = true,
+                    position = serializeVector(PlayerRoot.Position + PlayerRoot.CFrame.LookVector * 3),
+                    velocity = serializeVector(PlayerRoot.AssemblyLinearVelocity),
+                }
+            end
+        end
+    end
+
+    if not HasCarrier then
+        for _, Ball in getActiveBalls() do
+            Snapshot.balls[#Snapshot.balls + 1] = {
+                controlled = false,
+                state = Ball:GetAttribute("State"),
+                enabled = Ball:GetAttribute("Enabled") == true,
+                position = serializeVector(Ball.Position),
+                velocity = serializeVector(Ball.AssemblyLinearVelocity),
+            }
+        end
+    end
+
+    return Snapshot
+end
+
+local function recordSnapshot(Force)
+    if not TELEMETRY_ENABLED or not writefile then
+        return
+    end
+
+    local Now = os.clock()
+    if not Force and Now - LastTelemetryAt < TELEMETRY_INTERVAL then
+        return
+    end
+
+    LastTelemetryAt = Now
+    safeMakeTelemetryFolder()
+
+    local Snapshot = getStateSnapshot()
+    local Line = HttpService:JSONEncode(Snapshot) .. "\\n"
+
+    pcall(function()
+        if appendfile then
+            appendfile(TELEMETRY_PATH, Line)
+        else
+            local Existing = isfile and isfile(TELEMETRY_PATH) and readfile(TELEMETRY_PATH) or ""
+            writefile(TELEMETRY_PATH, Existing .. Line)
+        end
+    end)
+end
+
+local function attachRewardListener()
+    if RewardConnection then
+        pcall(function() RewardConnection:Disconnect() end)
+        RewardConnection = nil
+    end
+
+    GMC = game:GetService("ReplicatedStorage"):FindFirstChild("__GamemodeComm")
+    local RE = GMC and GMC:FindFirstChild("RE")
+    local DisplayPointsGain = RE and RE:FindFirstChild("DisplayPointsGain")
+
+    if not DisplayPointsGain or not DisplayPointsGain.OnClientEvent then
+        return
+    end
+
+    RewardConnection = DisplayPointsGain.OnClientEvent:Connect(function(...)
+        local RewardName
+        for _, Argument in {...} do
+            if type(Argument) == "string" then
+                if Argument == "Save!" or Argument == "Interception!" then
+                    RewardName = Argument
+                    break
+                end
+            end
+        end
+
+        if not RewardName then
+            return
+        end
+
+        LastRewardName = RewardName
+        LastReward = RewardName == "Save!" and 100 or 25
+        LastRewardAt = os.clock()
+        setAction(CurrentAction)
+        recordSnapshot(true)
+        print("[AutoGK][Reward]", RewardName)
+    end)
+end
+
+safeMakeTelemetryFolder()
+attachRewardListener()
+
+game:GetService("ReplicatedStorage").ChildAdded:Connect(function(Child)
+    if Child.Name ~= "__GamemodeComm" then
+        return
+    end
+
+    task.defer(function()
+        local RE = Child:WaitForChild("RE", 5)
+        if RE then
+            task.wait(0.1)
+            attachRewardListener()
+            print("[AutoGK] re-attached DisplayPointsGain")
+        end
+    end)
+end)
 
 local function debug(Name, Value)
 	if not DEBUG then
@@ -545,6 +762,7 @@ local function update()
 	end
 
 	if LocalPlayer:GetAttribute("HasBall") == true then
+		setAction("HAS_BALL")
 		if MovementController then
 			MovementController:SetSprintingControlState(false)
 		end
@@ -552,6 +770,10 @@ local function update()
 	end
 
 	local Now = os.clock()
+	if LastRewardName and Now - LastRewardAt > 0.75 then
+		LastRewardName = nil
+		LastReward = 0
+	end
 	local Opponent, OpponentRoot = getOpponentCarrier()
 
 	if Opponent and OpponentRoot then
@@ -580,19 +802,22 @@ local function update()
 
 	-- Finish a previous overhead reaction before starting another one.
 	if tryPendingDive(Goal, Root, Humanoid, Now) then
-		debug("Action", "APEX DIVE")
+		setAction("DIVE_APEX")
+        debug("Action", "APEX DIVE")
 		return
 	end
 
 	-- Immediate shot reaction has priority over positioning.
 	if FreeBall and isDangerousBall(Goal, FreeBall) then
 		if tryOverheadJump(FreeBall, Root, Humanoid, Now) then
-			debug("Action", "OVERHEAD JUMP")
+			setAction("JUMP")
+            debug("Action", "OVERHEAD JUMP")
 			return
 		end
 
 		if tryDive(Goal, FreeBall, Root, Now) then
-			debug("Action", "GROUND DIVE")
+			setAction("DIVE")
+            debug("Action", "GROUND DIVE")
 			return
 		end
 	end
@@ -604,10 +829,12 @@ local function update()
 			if math.abs(LocalBall.X) >= 2 then
 				if LocalBall.X < 0 then
 					Leap.Activate("Left")
-					debug("Action", "RECOVERY LEFT")
+					setAction("DIVE_LEFT")
+                    debug("Action", "RECOVERY LEFT")
 				else
 					Leap.Activate("Right")
-					debug("Action", "RECOVERY RIGHT")
+					setAction("DIVE_RIGHT")
+                    debug("Action", "RECOVERY RIGHT")
 				end
 				LastDiveAt = Now
 				return
@@ -619,7 +846,8 @@ local function update()
 			MovementController:SetSprintingControlState(true)
 		end
 		Humanoid:MoveTo(Target)
-		debug("Action", "RECOVER SLOW BALL")
+		setAction("RECOVER")
+        debug("Action", "RECOVER SLOW BALL")
 		return
 	end
 
@@ -644,6 +872,8 @@ local function update()
 	end
 
 	if not Target then
+		setAction("HOLD")
+		recordSnapshot(false)
 		return
 	end
 
