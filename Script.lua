@@ -53,7 +53,14 @@ local function GetOwnGoal()
     local Teams = Stadium and Stadium:FindFirstChild("Teams")
     local Team = Teams and Teams:FindFirstChild(Side)
 
-    return Team and Team:FindFirstChild("Goal")
+    local Goal = Team and Team:FindFirstChild("Goal")
+    if not Goal then return end
+
+    if Goal:IsA("BasePart") then
+        return Goal
+    end
+
+    return Goal:FindFirstChild("InterceptionHitbox") or Goal:FindFirstChild("Hitbox")
 end
 
 local function IsOpponent(Player)
