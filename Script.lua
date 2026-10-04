@@ -9,7 +9,6 @@ local UserInputService = game:GetService("UserInputService")
 local Knit = require(game:GetService("ReplicatedStorage").Packages.Knit)
 
 local LocalPlayer = Players.LocalPlayer
-local Camera = workspace.CurrentCamera
 
 local Running = true
 local MovementController
@@ -42,6 +41,7 @@ local CONTESTED_BALL_RADIUS = 12
 local MOVE_THRESHOLD = 1.0
 local DEBUG = true
 local DebugLast = {}
+_G.AutoGKDebug = {}
 
 local function debug(Name, Value)
 	if not DEBUG then
@@ -165,6 +165,15 @@ local function getNearestFreeBall(Root)
 	return BestBall, BestDistance
 end
 
+local function predictBallPosition(Ball, Time)
+	local Position = Ball.Position
+	local Velocity = Ball.AssemblyLinearVelocity
+
+	return Position
+		+ Velocity * Time
+		+ Vector3.new(0, -BALL_GRAVITY * 0.5 * Time * Time, 0)
+end
+
 local function getNearestOpponentDistance(Position)
 	local Best = math.huge
 
@@ -243,46 +252,36 @@ local function moveToGoalTarget(Humanoid, Root, Goal, Lateral, Depth)
 end
 
 local function isDangerousBall(Goal, Ball)
-	local LocalBall = Goal.CFrame:PointToObjectSpace(
-		predictBallPosition(Ball, SHOT_PREDICTION_TIME)
-	)
+	local GoalCFrame = Goal.CFrame
+	local LocalPosition = GoalCFrame:PointToObjectSpace(Ball.Position)
+	local LocalVelocity = GoalCFrame:VectorToObjectSpace(Ball.AssemblyLinearVelocity)
 
-	if math.abs(LocalBall.Z) > 13 or math.abs(LocalBall.X) > GOAL_LATERAL_LIMIT + 2 then
+	local GoalDirection = LocalPosition.Z >= 0 and -1 or 1
+	local TowardGoalSpeed = LocalVelocity.Z * GoalDirection
+
+	if TowardGoalSpeed <= 5 then
 		return false
 	end
 
-	local Velocity = Goal.CFrame:VectorToObjectSpace(Ball.AssemblyLinearVelocity)
-	local GoalDirection = LocalBall.Z >= 0 and -1 or 1
-
-	return Velocity.Z * GoalDirection > 5
-end
-
-local function getBestThreatBall(Goal, Root)
-	local BestBall
-	local BestScore = math.huge
-
-	for _, Ball in getActiveBalls() do
-		if Ball:GetAttribute("State") ~= "Possessed" then
-			local Distance = (Ball.Position - Root.Position).Magnitude
-			local Score = Distance
-
-			if isDangerousBall(Goal, Ball) then
-				Score -= 40
-			end
-
-			if Ball.Position.Y < LOW_BALL_Y then
-				Score += 1000
-			end
-
-			if Score < BestScore then
-				BestScore = Score
-				BestBall = Ball
-			end
-		end
+	local TimeToPlane = math.abs(LocalPosition.Z) / TowardGoalSpeed
+	if TimeToPlane < 0 or TimeToPlane > PREDICTION_MAX_TIME then
+		return false
 	end
 
-	return BestBall
+	local Predicted = predictBallPosition(Ball, TimeToPlane)
+	local LocalPredicted = GoalCFrame:PointToObjectSpace(Predicted)
+
+	if math.abs(LocalPredicted.X) > GOAL_LATERAL_LIMIT + 2 then
+		return false
+	end
+
+	if math.abs(LocalPredicted.Z) > 3 then
+		return false
+	end
+
+	return true
 end
+
 
 local function shouldRecoverSlowBall(Ball, Distance)
 	if not Ball or Distance > SLOW_BALL_RANGE then
@@ -296,14 +295,6 @@ local function shouldRecoverSlowBall(Ball, Distance)
 	return getNearestOpponentDistance(Ball.Position) > CONTESTED_BALL_RADIUS
 end
 
-local function predictBallPosition(Ball, Time)
-	local Position = Ball.Position
-	local Velocity = Ball.AssemblyLinearVelocity
-
-	return Position
-		+ Velocity * Time
-		+ Vector3.new(0, -BALL_GRAVITY * 0.5 * Time * Time, 0)
-end
 
 local function getOverheadPrediction(Ball, Root)
 	local Velocity = Ball.AssemblyLinearVelocity
@@ -469,7 +460,7 @@ local function tryOverheadJump(Ball, Root, Humanoid, Now)
 	end
 
 	if Now - LastJumpAt < 0.55 then
-		return true
+		return false
 	end
 
 	if Humanoid.FloorMaterial ~= Enum.Material.Air then
@@ -586,15 +577,16 @@ local function update()
 		end
 	end
 
+	-- Finish a previous overhead reaction before starting another one.
+	if tryPendingDive(Goal, Root, Humanoid, Now) then
+		debug("Action", "APEX DIVE")
+		return
+	end
+
 	-- Immediate shot reaction has priority over positioning.
 	if FreeBall and isDangerousBall(Goal, FreeBall) then
 		if tryOverheadJump(FreeBall, Root, Humanoid, Now) then
 			debug("Action", "OVERHEAD JUMP")
-			return
-		end
-
-		if tryPendingDive(Goal, Root, Humanoid, Now) then
-			debug("Action", "APEX DIVE")
 			return
 		end
 
@@ -661,13 +653,11 @@ local function update()
 		Humanoid:MoveTo(Target)
 end
 
-	_G.AutoGKDebug = {
-		ThreatPlayer = Opponent,
-		ThreatBall = FreeBall,
-		ThreatType = Opponent and "PLAYER" or (FreeBall and "BALL" or "CAMERA"),
-		Target = Target,
-		DistanceToTarget = (Target - Root.Position).Magnitude,
-	}
+	_G.AutoGKDebug.ThreatPlayer = Opponent
+	_G.AutoGKDebug.ThreatBall = FreeBall
+	_G.AutoGKDebug.ThreatType = Opponent and "PLAYER" or (FreeBall and "BALL" or "CAMERA")
+	_G.AutoGKDebug.Target = Target
+	_G.AutoGKDebug.DistanceToTarget = (Target - Root.Position).Magnitude
 
 	debug("Target", string.format("x=%.2f z=%.2f", Goal.CFrame:PointToObjectSpace(Target).X, Goal.CFrame:PointToObjectSpace(Target).Z))
 end
