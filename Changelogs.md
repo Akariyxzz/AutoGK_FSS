@@ -23,3 +23,5 @@
 ### Notes
 - The behavioral rules are intended as implementation guidance and are not claims that every described goalkeeper technique is a hard game mechanic.
 - Significant future changes to `Script.lua` should be reflected here.
+
+- Removed the previous `Script.lua` implementation; future Auto GK development will restart from `Old.lua` as the codebase baseline.
