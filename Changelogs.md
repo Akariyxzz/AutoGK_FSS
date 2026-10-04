@@ -29,3 +29,5 @@
 - Recreated `Script.lua` as an exact baseline copy of `Old.lua`; future implementation work will be built from this baseline.
 
 - Rebuilt `Script.lua` from the `Old.lua` baseline with goalkeeper behavior: goal-local positioning, camera-view tracking, threat/ball prioritization, live trajectory checks, slow uncontested-ball recovery, controlled depth, and debug state. Camera tracking is read-only and no longer overwrites `CurrentCamera.CFrame`.
+
+- Fixed the Old.lua-based rebuild: corrected the predictBallPosition local-scope bug, made dangerous-shot detection use actual goal-plane crossing time, fixed overhead-jump cooldown logic, prioritized pending apex dives correctly, removed unused threat-ball selection code, and initialized persistent debug state before action handlers use it.
