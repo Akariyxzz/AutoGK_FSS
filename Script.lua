@@ -1,7 +1,3 @@
--- For AI: Do not attempt to copy this code, this was the previous code, which is not good. You may not use this as reference.
-
-
-
 -- Auto GK for FSS
 -- Tracks opponent ball carriers and loose footballs without chasing
 -- the football outside the goalkeeper's useful positioning area.
@@ -33,6 +29,33 @@ local PREDICTION_STEP = 0.03
 local OVERHEAD_MIN_HEIGHT = 1.5
 local OVERHEAD_MAX_HEIGHT = 10
 local OVERHEAD_RADIUS = 9
+
+local GOAL_LATERAL_LIMIT = 13
+local GOAL_MIN_DEPTH = 6
+local GOAL_MAX_DEPTH = 12
+local CAMERA_TRACK_WEIGHT = 0.65
+local THREAT_TRACK_WEIGHT = 0.35
+local SHOT_PREDICTION_TIME = 0.18
+local SLOW_BALL_SPEED = 35
+local SLOW_BALL_RANGE = 55
+local CONTESTED_BALL_RADIUS = 12
+local MOVE_THRESHOLD = 1.0
+local DEBUG = true
+local DebugLast = {}
+
+local function debug(Name, Value)
+	if not DEBUG then
+		return
+	end
+
+	local Text = tostring(Value)
+	if DebugLast[Name] == Text then
+		return
+	end
+
+	DebugLast[Name] = Text
+	print("[AutoGK][" .. Name .. "]", Text)
+end
 
 pcall(function()
 	MovementController = Knit.GetController("MovementController")
@@ -74,7 +97,12 @@ local function getGoal()
 		return
 	end
 
-	return Goal
+	if Goal:IsA("BasePart") then
+		return Goal
+	end
+
+	return Goal:FindFirstChild("InterceptionHitbox")
+		or Goal:FindFirstChild("Hitbox")
 end
 
 local function getActiveBalls()
@@ -134,7 +162,138 @@ local function getNearestFreeBall(Root)
 		end
 	end
 
+	return BestBall, BestDistance
+end
+
+local function getNearestOpponentDistance(Position)
+	local Best = math.huge
+
+	for _, Player in Players:GetPlayers() do
+		if Player ~= LocalPlayer
+			and Player:GetAttribute("IsOnPitch") == true
+			and Player:GetAttribute("IsHomeOrAway") ~= getSide() then
+			local Root = getRoot(Player)
+			if Root then
+				Best = math.min(Best, (Root.Position - Position).Magnitude)
+			end
+		end
+	end
+
+	return Best
+end
+
+local function getCameraGoalLateral(Goal)
+	local CameraObject = workspace.CurrentCamera
+	if not CameraObject then
+		return 0
+	end
+
+	local P = Goal.CFrame:PointToObjectSpace(CameraObject.CFrame.Position)
+	local D = Goal.CFrame:VectorToObjectSpace(CameraObject.CFrame.LookVector)
+
+	if math.abs(D.Z) < 0.05 then
+		return math.clamp(P.X, -GOAL_LATERAL_LIMIT, GOAL_LATERAL_LIMIT)
+	end
+
+	local T = -P.Z / D.Z
+	return math.clamp(P.X + D.X * T, -GOAL_LATERAL_LIMIT, GOAL_LATERAL_LIMIT)
+end
+
+local function getThreatLateral(Goal, Position)
+	local LocalPosition = Goal.CFrame:PointToObjectSpace(Position)
+	return math.clamp(LocalPosition.X, -GOAL_LATERAL_LIMIT, GOAL_LATERAL_LIMIT)
+end
+
+local function getDefensiveLateral(Goal, Position)
+	local Threat = getThreatLateral(Goal, Position)
+	local CameraTarget = getCameraGoalLateral(Goal)
+
+	return math.clamp(
+		Threat * THREAT_TRACK_WEIGHT + CameraTarget * CAMERA_TRACK_WEIGHT,
+		-GOAL_LATERAL_LIMIT,
+		GOAL_LATERAL_LIMIT
+	)
+end
+
+local function getGoalTarget(Goal, Root, Lateral, Depth)
+	local LocalRoot = Goal.CFrame:PointToObjectSpace(Root.Position)
+	local DepthSign = LocalRoot.Z >= 0 and 1 or -1
+
+	return Goal.CFrame:PointToWorldSpace(Vector3.new(
+		math.clamp(Lateral, -GOAL_LATERAL_LIMIT, GOAL_LATERAL_LIMIT),
+		0,
+		DepthSign * math.clamp(Depth, GOAL_MIN_DEPTH, GOAL_MAX_DEPTH)
+	))
+end
+
+local function moveToGoalTarget(Humanoid, Root, Goal, Lateral, Depth)
+	local Target = getGoalTarget(Goal, Root, Lateral, Depth)
+
+	if (Target - Root.Position).Magnitude <= MOVE_THRESHOLD then
+		return
+	end
+
+	if MovementController then
+		MovementController:SetSprintingControlState(
+			(Target - Root.Position).Magnitude > 1.5
+		)
+	end
+
+	Humanoid:MoveTo(Target)
+end
+
+local function isDangerousBall(Goal, Ball)
+	local LocalBall = Goal.CFrame:PointToObjectSpace(
+		predictBallPosition(Ball, SHOT_PREDICTION_TIME)
+	)
+
+	if math.abs(LocalBall.Z) > 13 or math.abs(LocalBall.X) > GOAL_LATERAL_LIMIT + 2 then
+		return false
+	end
+
+	local Velocity = Goal.CFrame:VectorToObjectSpace(Ball.AssemblyLinearVelocity)
+	local GoalDirection = LocalBall.Z >= 0 and -1 or 1
+
+	return Velocity.Z * GoalDirection > 5
+end
+
+local function getBestThreatBall(Goal, Root)
+	local BestBall
+	local BestScore = math.huge
+
+	for _, Ball in getActiveBalls() do
+		if Ball:GetAttribute("State") ~= "Possessed" then
+			local Distance = (Ball.Position - Root.Position).Magnitude
+			local Score = Distance
+
+			if isDangerousBall(Goal, Ball) then
+				Score -= 40
+			end
+
+			if Ball.Position.Y < LOW_BALL_Y then
+				Score += 1000
+			end
+
+			if Score < BestScore then
+				BestScore = Score
+				BestBall = Ball
+			end
+		end
+	end
+
 	return BestBall
+end
+
+local function shouldRecoverSlowBall(Ball, Distance)
+	if not Ball or Distance > SLOW_BALL_RANGE then
+		return false
+	end
+
+	if Ball.AssemblyLinearVelocity.Magnitude > SLOW_BALL_SPEED then
+		return false
+	end
+
+	return getNearestOpponentDistance(Ball.Position) > CONTESTED_BALL_RADIUS
 end
 
 local function predictBallPosition(Ball, Time)
@@ -195,19 +354,14 @@ local function getOverheadPrediction(Ball, Root)
 	end
 end
 
-local function getPlayerTrackingTarget(Goal, Player)
+local function getPlayerTrackingTarget(Goal, Player, Root)
 	local ThreatRoot = Player.Character and Player.Character:FindFirstChild("HumanoidRootPart")
 	if not ThreatRoot then
 		return
 	end
 
-	-- Use the actual interception box as the goal reference. The Goal
-	-- model pivot is not guaranteed to be the physical center of the goal.
-	local Interception = Goal:FindFirstChild("InterceptionHitbox")
-	local GoalCFrame = Interception and Interception.CFrame or Goal:GetPivot()
-	local GoalPosition = GoalCFrame.Position
+	local GoalPosition = Goal.Position
 	local ThreatPosition = ThreatRoot.Position
-
 	local ToThreat = Vector3.new(
 		ThreatPosition.X - GoalPosition.X,
 		0,
@@ -219,50 +373,28 @@ local function getPlayerTrackingTarget(Goal, Player)
 		return GoalPosition
 	end
 
-	local DirectionToThreat = ToThreat.Unit
-	local LocalThreat = GoalCFrame:PointToObjectSpace(ThreatPosition)
+	local LocalThreat = Goal.CFrame:PointToObjectSpace(ThreatPosition)
+	local Lateral = getDefensiveLateral(Goal, ThreatPosition)
 
-	-- Wide angles need the GK to step out toward the shooter, not just
-	-- slide sideways. The target is deliberately based on the real
-	-- goal-to-shooter line so the movement is visible and substantial.
 	local AngleWidth = math.clamp(
 		math.abs(LocalThreat.X) / math.max(math.abs(LocalThreat.Z), 1),
 		0,
 		1.5
 	)
 
-local Forward = math.clamp(
-		10 + AngleWidth * 5,
-		10,
-		17
-	)
+	local Forward = math.clamp(10 + AngleWidth * 5, 10, 17)
+	Forward = math.min(Forward, math.max(DistanceFromGoal - 3, 6))
 
-	-- Never place the GK beyond the attacker.
-	Forward = math.min(
-		Forward,
-		math.max(DistanceFromGoal - 3, 6)
-	)
-
-	local Target = GoalPosition + DirectionToThreat * Forward
-	return Vector3.new(Target.X, ThreatRoot.Position.Y, Target.Z)
+	return getGoalTarget(Goal, Root, Lateral, Forward)
 end
 
-local function getBallTrackingTarget(Goal, Ball)
-	local GoalCFrame = Goal:GetPivot()
+local function getBallTrackingTarget(Goal, Ball, Root)
 	local Predicted = predictBallPosition(Ball, 0.12)
-	local LocalBall = GoalCFrame:PointToObjectSpace(Predicted)
+	local LocalBall = Goal.CFrame:PointToObjectSpace(Predicted)
+	local Lateral = getDefensiveLateral(Goal, Predicted)
+	local Depth = math.clamp(math.abs(LocalBall.Z) * 0.15, GOAL_MIN_DEPTH, GOAL_MAX_DEPTH)
 
-	-- Follow the ball laterally across the goal mouth, but clamp depth
-	-- so a distant loose ball cannot pull the GK out of position.
-	local Lateral = math.clamp(LocalBall.X, -12, 12)
-	local DepthSign = LocalBall.Z >= 0 and 1 or -1
-	local Forward = math.clamp(math.abs(LocalBall.Z) * 0.15, 6, 11)
-
-	return GoalCFrame:PointToWorldSpace(Vector3.new(
-		Lateral,
-		0,
-		DepthSign * Forward
-	))
+	return getGoalTarget(Goal, Root, Lateral, Depth)
 end
 
 local function tryDive(Goal, Ball, Root, Now)
@@ -318,13 +450,8 @@ local function tryDive(Goal, Ball, Root, Now)
 end
 
 local function trackCamera(Position)
-	local CameraPosition = Camera.CFrame.Position
-	local LookPosition = Position + Vector3.new(0, 1.5, 0)
-
-	Camera.CFrame = CFrame.lookAt(
-		CameraPosition,
-		LookPosition
-	)
+	-- Camera is a read-only defensive reference. Never overwrite CurrentCamera.CFrame.
+	debug("Camera", string.format("tracking x=%.2f z=%.2f", Position.X, Position.Z))
 end
 
 local function tryOverheadJump(Ball, Root, Humanoid, Now)
@@ -426,6 +553,9 @@ local function update()
 	end
 
 	if LocalPlayer:GetAttribute("HasBall") == true then
+		if MovementController then
+			MovementController:SetSprintingControlState(false)
+		end
 		return
 	end
 
@@ -436,14 +566,17 @@ local function update()
 		LastOpponentCarrier = Opponent
 	end
 
-	local FreeBall = getNearestFreeBall(Root)
-	local LowBall = FreeBall and FreeBall.Position.Y <= LOW_BALL_Y
+	local Goal = getGoal()
+	if not Goal then
+		debug("Goal", "not found")
+		return
+	end
 
-	-- When the ball falls far below the pitch, keep the GK on the
-	-- opponent who last had possession instead of chasing the ball.
-	if LowBall and LastOpponentCarrier then
+	local FreeBall, FreeBallDistance = getNearestFreeBall(Root)
+
+	-- A ball far below the playable area is not a defensive target.
+	if FreeBall and FreeBall.Position.Y <= LOW_BALL_Y and LastOpponentCarrier then
 		local LastRoot = getRoot(LastOpponentCarrier)
-
 		if LastRoot
 			and LastOpponentCarrier:GetAttribute("IsOnPitch") == true
 			and LastOpponentCarrier:GetAttribute("IsHomeOrAway") ~= getSide() then
@@ -453,83 +586,95 @@ local function update()
 		end
 	end
 
-	_G.AutoGKDebug = {
-		ThreatPlayer = Opponent,
-		ThreatBall = FreeBall,
-		ThreatType = Opponent and "PLAYER" or nil,
-		Jump = false,
-	}
-
-	local Goal = getGoal()
-
-	if not Goal then
-		return
-	end
-
-	_G.AutoGKDebug.Dive = false
-
-	-- If the ball is elevated and approaching the GK, jump first.
-	-- The apex dive is handled separately once the GK has risen.
-	if FreeBall and tryOverheadJump(FreeBall, Root, Humanoid, Now) then
-		trackCamera(FreeBall.Position)
-		return
-	end
-
-	-- Finish an overhead save by diving at the apex of the jump.
-	if tryPendingDive(Goal, Root, Humanoid, Now) then
-		trackCamera(PendingDiveBall and PendingDiveBall.Position or Root.Position)
-		return
-	end
-
-	-- Dive for a dangerous ground-level ball.
-	if FreeBall and tryDive(Goal, FreeBall, Root, Now) then
-		trackCamera(FreeBall.Position)
-		return
-	end
-
-	-- A loose ball can trigger a jump. Jumping does not make the ball
-	-- the movement target by itself.
-	if false then
-		if FreeBall then
-			trackCamera(FreeBall.Position)
+	-- Immediate shot reaction has priority over positioning.
+	if FreeBall and isDangerousBall(Goal, FreeBall) then
+		if tryOverheadJump(FreeBall, Root, Humanoid, Now) then
+			debug("Action", "OVERHEAD JUMP")
+			return
 		end
 
+		if tryPendingDive(Goal, Root, Humanoid, Now) then
+			debug("Action", "APEX DIVE")
+			return
+		end
+
+		if tryDive(Goal, FreeBall, Root, Now) then
+			debug("Action", "GROUND DIVE")
+			return
+		end
+	end
+
+	-- Recover a slow, uncontested loose ball instead of ignoring a free save.
+	if FreeBall and shouldRecoverSlowBall(FreeBall, FreeBallDistance) then
+		if FreeBallDistance <= 8 and Leap and Now - LastDiveAt >= 1 then
+			local LocalBall = Root.CFrame:PointToObjectSpace(FreeBall.Position)
+			if math.abs(LocalBall.X) >= 2 then
+				if LocalBall.X < 0 then
+					Leap.Activate("Left")
+					debug("Action", "RECOVERY LEFT")
+				else
+					Leap.Activate("Right")
+					debug("Action", "RECOVERY RIGHT")
+				end
+				LastDiveAt = Now
+				return
+			end
+		end
+
+		local Target = Vector3.new(FreeBall.Position.X, Root.Position.Y, FreeBall.Position.Z)
+		if MovementController then
+			MovementController:SetSprintingControlState(true)
+		end
+		Humanoid:MoveTo(Target)
+		debug("Action", "RECOVER SLOW BALL")
 		return
 	end
 
 	local Target
-	local CameraTarget
 
 	if Opponent and OpponentRoot then
-		Target = getPlayerTrackingTarget(Goal, Opponent)
-		CameraTarget = OpponentRoot.Position
-	elseif FreeBall then
-		Target = getBallTrackingTarget(Goal, FreeBall)
-		CameraTarget = FreeBall.Position
+		Target = getPlayerTrackingTarget(Goal, Opponent, Root)
+		debug("Threat", "PLAYER " .. Opponent.Name)
+	elseif FreeBall and FreeBallDistance <= 45 then
+		Target = getBallTrackingTarget(Goal, FreeBall, Root)
+		debug("Threat", "BALL")
 	else
+		-- No immediate threat: track the camera's view across the goal while
+		-- remaining at a safe depth instead of snapping to center.
+		local CameraLateral = getCameraGoalLateral(Goal)
+		Target = getGoalTarget(Goal, Root, CameraLateral, 7)
+		debug("Threat", "NONE / CAMERA")
+	end
+
+	if not Target then
 		return
 	end
 
-	Target = Vector3.new(
-		Target.X,
-		Root.Position.Y,
-		Target.Z
-	)
+	Target = Vector3.new(Target.X, Root.Position.Y, Target.Z)
 
-	local DistanceToTarget = (Target - Root.Position).Magnitude
-
-	if MovementController then
-		MovementController:SetSprintingControlState(DistanceToTarget > 1.5)
-	end
-
-	Humanoid:MoveTo(Target)
-
-	_G.AutoGKDebug.Target = Target
-	_G.AutoGKDebug.DistanceToTarget = DistanceToTarget
-	_G.AutoGKDebug.ThreatType = Opponent and "PLAYER" or "BALL"
-
-	trackCamera(CameraTarget)
+	if (Target - Root.Position).Magnitude > MOVE_THRESHOLD then
+		if MovementController then
+			MovementController:SetSprintingControlState(
+				(Target - Root.Position).Magnitude > 1.5
+			)
+		end
+		Humanoid:MoveTo(Target)
 end
+
+	_G.AutoGKDebug = {
+		ThreatPlayer = Opponent,
+		ThreatBall = FreeBall,
+		ThreatType = Opponent and "PLAYER" or (FreeBall and "BALL" or "CAMERA"),
+		Target = Target,
+		DistanceToTarget = (Target - Root.Position).Magnitude,
+	}
+
+	debug("Target", string.format("x=%.2f z=%.2f", Goal.CFrame:PointToObjectSpace(Target).X, Goal.CFrame:PointToObjectSpace(Target).Z))
+end
+
+debug("Loaded", LocalPlayer.Name)
+debug("Team", tostring(LocalPlayer:GetAttribute("TeamPosition")))
+debug("Side", tostring(LocalPlayer:GetAttribute("IsHomeOrAway")))
 
 RunService.Heartbeat:Connect(update)
 
