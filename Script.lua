@@ -1,5 +1,6 @@
--- Auto GK - initial implementation
--- Phase 1: GK detection, goal positioning, and basic threat tracking.
+-- Auto GK - FSS
+-- Phase 2: goal positioning, threat tracking, loose-ball prediction,
+-- overhead jumps, lateral dives, and runtime diagnostics.
 -- Behavior rules: see Behavior.md
 -- Verified mechanics: see Info.md
 
@@ -12,34 +13,72 @@ local LocalPlayer = Players.LocalPlayer
 local Knit = require(ReplicatedStorage.Packages.Knit)
 
 local Running = true
-local DebugLast = {}
 local DEBUG = true
+
+local MovementController
+local Leap
+
+local LastOpponentCarrier
+local LastJumpAt = 0
+local LastDiveAt = 0
+local PendingDiveBall
+local PendingDiveStartedAt = 0
+
 local DebugLast = {}
 
+local BALL_GRAVITY = 196.2
+local PREDICTION_MIN_TIME = 0.08
+local PREDICTION_MAX_TIME = 0.8
+local PREDICTION_STEP = 0.03
+
+local OVERHEAD_MIN_HEIGHT = 1.5
+local OVERHEAD_MAX_HEIGHT = 10
+local OVERHEAD_RADIUS = 9
+
+local GOAL_LATERAL_LIMIT = 12
+local GOAL_MIN_DEPTH = 6
+local GOAL_MAX_DEPTH = 11
+local MOVE_THRESHOLD = 1.25
+
 local function Debug(Name, Value)
-    if not DEBUG then return end
+    if not DEBUG then
+        return
+    end
+
     local Text = tostring(Value)
-    if DebugLast[Name] == Text then return end
+
+    if DebugLast[Name] == Text then
+        return
+    end
+
     DebugLast[Name] = Text
     print("[AutoGK][" .. Name .. "]", Text)
 end
-local LastOpponentCarrier = nil
 
-local GOAL_FORWARD_OFFSET = 7
-local GOAL_LATERAL_LIMIT = 12
-local MOVE_THRESHOLD = 1.25
+pcall(function()
+    MovementController = Knit.GetController("MovementController")
+end)
 
-local function GetCharacter()
-    local Character = LocalPlayer.Character
+pcall(function()
+    Leap = require(
+        LocalPlayer.PlayerScripts.Client.Controllers.Actions.Managers.Leap
+    )
+end)
+
+local function GetCharacter(Player)
+    local Character = Player.Character
+
     if not Character then
-        Debug("Character", "Missing character/humanoid/root")
         return
     end
 
     local Humanoid = Character:FindFirstChildOfClass("Humanoid")
     local Root = Character:FindFirstChild("HumanoidRootPart")
 
-    if not Humanoid or not Root or Humanoid.Health <= 0 then return end
+    if not Humanoid or not Root or Humanoid.Health <= 0 then
+        return
+    end
+
     return Character, Humanoid, Root
 end
 
@@ -47,82 +86,487 @@ local function IsGoalkeeper()
     return LocalPlayer:GetAttribute("TeamPosition") == "GK"
 end
 
+local function GetSide()
+    return LocalPlayer:GetAttribute("IsHomeOrAway")
+end
+
 local function GetOwnGoal()
-    local Side = LocalPlayer:GetAttribute("IsHomeOrAway")
-    if Side ~= "Home" and Side ~= "Away" then return end
+    local Side = GetSide()
+
+    if Side ~= "Home" and Side ~= "Away" then
+        return
+    end
 
     local Stadium = workspace:FindFirstChild("Stadium")
     local Teams = Stadium and Stadium:FindFirstChild("Teams")
     local Team = Teams and Teams:FindFirstChild(Side)
-
     local Goal = Team and Team:FindFirstChild("Goal")
-    if not Goal then return end
+
+    if not Goal then
+        return
+    end
 
     if Goal:IsA("BasePart") then
         return Goal
     end
 
-    return Goal:FindFirstChild("InterceptionHitbox") or Goal:FindFirstChild("Hitbox")
+    return Goal:FindFirstChild("InterceptionHitbox")
+        or Goal:FindFirstChild("Hitbox")
 end
 
 local function IsOpponent(Player)
-    if Player == LocalPlayer then return false end
-    if Player:GetAttribute("IsOnPitch") ~= true then return false end
+    if Player == LocalPlayer then
+        return false
+    end
 
-    return Player:GetAttribute("IsHomeOrAway")
-        ~= LocalPlayer:GetAttribute("IsHomeOrAway")
+    if Player:GetAttribute("IsOnPitch") ~= true then
+        return false
+    end
+
+    return Player:GetAttribute("IsHomeOrAway") ~= GetSide()
 end
 
 local function GetOpponentCarrier()
     for _, Player in Players:GetPlayers() do
         if IsOpponent(Player) and Player:GetAttribute("HasBall") == true then
-            return Player
+            local _, _, Root = GetCharacter(Player)
+
+            if Root then
+                return Player, Root
+            end
         end
     end
 end
 
-local function GetThreatLateral(Goal, Player)
-    local Character = Player.Character
-    local Root = Character and Character:FindFirstChild("HumanoidRootPart")
+local function GetActiveBalls()
+    local Misc = workspace:FindFirstChild("Misc")
 
-    if not Root then return 0 end
+    if not Misc then
+        return {}
+    end
 
-    local LocalPosition = Goal.CFrame:PointToObjectSpace(Root.Position)
-    return math.clamp(LocalPosition.X, -GOAL_LATERAL_LIMIT, GOAL_LATERAL_LIMIT)
+    local Balls = {}
+
+    for _, Object in Misc:GetChildren() do
+        if Object:IsA("BasePart")
+            and Object.Name:sub(1, 9) == "Football "
+            and Object:GetAttribute("Enabled") == true then
+            Balls[#Balls + 1] = Object
+        end
+    end
+
+    return Balls
 end
 
-local function MoveToGoalPosition(Humanoid, Root, Goal, Lateral)
-    if not Goal:IsA("BasePart") then
-        Debug("Goal", "Goal is " .. Goal.ClassName .. "; expected BasePart")
-        return
+local function GetNearestFreeBall(Root)
+    local BestBall
+    local BestDistance = math.huge
+
+    for _, Ball in GetActiveBalls() do
+        if Ball:GetAttribute("State") ~= "Possessed" then
+            local Distance = (Ball.Position - Root.Position).Magnitude
+
+            if Distance < BestDistance then
+                BestDistance = Distance
+                BestBall = Ball
+            end
+        end
     end
-    local TargetLateral = math.clamp(Lateral, -GOAL_LATERAL_LIMIT, GOAL_LATERAL_LIMIT)
-    local Target = Goal.CFrame:PointToWorldSpace(
-        Vector3.new(TargetLateral, 0, GOAL_FORWARD_OFFSET)
+
+    return BestBall, BestDistance
+end
+
+local function PredictBall(Ball, Time)
+    return Ball.Position
+        + Ball.AssemblyLinearVelocity * Time
+        + Vector3.new(0, -0.5 * BALL_GRAVITY * Time * Time, 0)
+end
+
+local function GetThreatLateral(Goal, Player)
+    local _, _, Root = GetCharacter(Player)
+
+    if not Root then
+        return 0
+    end
+
+    local LocalPosition = Goal.CFrame:PointToObjectSpace(Root.Position)
+
+    return math.clamp(
+        LocalPosition.X,
+        -GOAL_LATERAL_LIMIT,
+        GOAL_LATERAL_LIMIT
     )
+end
 
+local function GetGoalDepthSign(Goal, Root)
+    local LocalRoot = Goal.CFrame:PointToObjectSpace(Root.Position)
+
+    if LocalRoot.Z >= 0 then
+        return 1
+    end
+
+    return -1
+end
+
+local function GetGoalTarget(Goal, Root, Lateral, Depth)
+    local DepthSign = GetGoalDepthSign(Goal, Root)
+
+    return Goal.CFrame:PointToWorldSpace(Vector3.new(
+        math.clamp(Lateral, -GOAL_LATERAL_LIMIT, GOAL_LATERAL_LIMIT),
+        0,
+        DepthSign * math.clamp(Depth, GOAL_MIN_DEPTH, GOAL_MAX_DEPTH)
+    ))
+end
+
+local function MoveToGoalTarget(Humanoid, Root, Goal, Lateral, Depth)
+    local Target = GetGoalTarget(Goal, Root, Lateral, Depth)
     local Current = Goal.CFrame:PointToObjectSpace(Root.Position)
+    local TargetLocal = Goal.CFrame:PointToObjectSpace(Target)
 
-    if math.abs(Current.X - TargetLateral) <= MOVE_THRESHOLD
-        and math.abs(Current.Z - GOAL_FORWARD_OFFSET) <= MOVE_THRESHOLD then
+    if math.abs(Current.X - TargetLocal.X) <= MOVE_THRESHOLD
+        and math.abs(Current.Z - TargetLocal.Z) <= MOVE_THRESHOLD then
         return
     end
 
-    Debug("Move", string.format("Moving to %.2f, %.2f, %.2f", Target.X, Target.Y, Target.Z))
+    Debug("Move", string.format(
+        "target local X=%.2f Z=%.2f",
+        TargetLocal.X,
+        TargetLocal.Z
+    ))
+
+    if MovementController then
+        MovementController:SetSprintingControlState(
+            (Target - Root.Position).Magnitude > 1.5
+        )
+    end
+
     Humanoid:MoveTo(Target)
 end
 
-local function StopMovement(Humanoid)
-    local Root = Humanoid.RootPart
-    if Root then
-        Humanoid:MoveTo(Root.Position)
+local function GetOverheadPrediction(Ball, Root)
+    local Velocity = Ball.AssemblyLinearVelocity
+
+    for Time = PREDICTION_MIN_TIME, PREDICTION_MAX_TIME, PREDICTION_STEP do
+        local Predicted = PredictBall(Ball, Time)
+        local Height = Predicted.Y - Root.Position.Y
+
+        if Height >= OVERHEAD_MIN_HEIGHT
+            and Height <= OVERHEAD_MAX_HEIGHT then
+
+            local Horizontal = Vector3.new(
+                Predicted.X - Root.Position.X,
+                0,
+                Predicted.Z - Root.Position.Z
+            )
+
+            if Horizontal.Magnitude <= OVERHEAD_RADIUS then
+                return Predicted, Time
+            end
+        end
+    end
+
+    local CurrentHeight = Ball.Position.Y - Root.Position.Y
+    local HorizontalVelocity = Vector3.new(
+        Velocity.X,
+        0,
+        Velocity.Z
+    )
+
+    local ToGK = Vector3.new(
+        Root.Position.X - Ball.Position.X,
+        0,
+        Root.Position.Z - Ball.Position.Z
+    )
+
+    if CurrentHeight >= OVERHEAD_MIN_HEIGHT
+        and CurrentHeight <= OVERHEAD_MAX_HEIGHT
+        and HorizontalVelocity.Magnitude > 1
+        and ToGK.Magnitude <= OVERHEAD_RADIUS * 1.5 then
+
+        if HorizontalVelocity.Unit:Dot(ToGK.Unit) > 0.15 then
+            return Ball.Position, 0
+        end
     end
 end
 
+local function TryOverheadJump(Ball, Root, Humanoid, Now)
+    if not Ball then
+        return false
+    end
+
+    local Predicted, PredictionTime = GetOverheadPrediction(Ball, Root)
+
+    if not Predicted then
+        return false
+    end
+
+    Debug("Overhead", string.format(
+        "ball detected t=%.2f height=%.2f",
+        PredictionTime,
+        Predicted.Y - Root.Position.Y
+    ))
+
+    if Now - LastJumpAt < 0.55 then
+        return true
+    end
+
+    if Humanoid.FloorMaterial ~= Enum.Material.Air then
+        Humanoid:ChangeState(Enum.HumanoidStateType.Jumping)
+
+        LastJumpAt = Now
+        PendingDiveBall = Ball
+        PendingDiveStartedAt = Now
+
+        Debug("Jump", "Jumping for overhead ball")
+    end
+
+    return true
+end
+
+local function TryPendingDive(Root, Now)
+    if not PendingDiveBall or not Leap then
+        return false
+    end
+
+    local Ball = PendingDiveBall
+
+    if not Ball.Parent or Ball:GetAttribute("Enabled") ~= true then
+        PendingDiveBall = nil
+        return false
+    end
+
+    if Now - PendingDiveStartedAt < 0.12 then
+        return false
+    end
+
+    if Root.AssemblyLinearVelocity.Y > 1 then
+        return false
+    end
+
+    PendingDiveBall = nil
+
+    if Now - LastDiveAt < 1 then
+        return false
+    end
+
+    local Predicted = PredictBall(Ball, 0.08)
+    local LocalBall = Root.CFrame:PointToObjectSpace(Predicted)
+
+    if math.abs(LocalBall.X) < 2 then
+        return false
+    end
+
+    if LocalBall.X < 0 then
+        Leap.Activate("Left")
+        Debug("Dive", "LEFT")
+    else
+        Leap.Activate("Right")
+        Debug("Dive", "RIGHT")
+    end
+
+    LastDiveAt = Now
+
+    return true
+end
+
+local function TryGroundDive(Goal, Ball, Root, Now)
+    if not Ball or not Leap then
+        return false
+    end
+
+    if Now - LastDiveAt < 1 then
+        return false
+    end
+
+    local Predicted = PredictBall(Ball, 0.18)
+    local LocalBall = Goal.CFrame:PointToObjectSpace(Predicted)
+
+    if math.abs(LocalBall.Z) > 13 then
+        return false
+    end
+
+    if math.abs(LocalBall.X) < 4.5 then
+        return false
+    end
+
+    local LocalVelocity = Goal.CFrame:VectorToObjectSpace(
+        Ball.AssemblyLinearVelocity
+    )
+
+    local GoalDirection = LocalBall.Z >= 0 and -1 or 1
+
+    if LocalVelocity.Z * GoalDirection <= 5 then
+        return false
+    end
+
+    local CharacterBall = Root.CFrame:PointToObjectSpace(Predicted)
+
+    if CharacterBall.X < 0 then
+        Leap.Activate("Left")
+        Debug("Dive", "GROUND LEFT")
+    else
+        Leap.Activate("Right")
+        Debug("Dive", "GROUND RIGHT")
+    end
+
+    LastDiveAt = Now
+
+    return true
+end
+
+local function Update()
+    if not Running then
+        return
+    end
+
+    if not IsGoalkeeper() then
+        Debug("Status", "Not GK; TeamPosition=" .. tostring(
+            LocalPlayer:GetAttribute("TeamPosition")
+        ))
+        return
+    end
+
+    local Character, Humanoid, Root = GetCharacter(LocalPlayer)
+
+    if not Character then
+        Debug("Character", "Missing character/humanoid/root")
+        return
+    end
+
+    Debug("Status", "GK active")
+
+    if LocalPlayer:GetAttribute("HasBall") == true then
+        if MovementController then
+            MovementController:SetSprintingControlState(false)
+        end
+
+        Humanoid:MoveTo(Root.Position)
+        Debug("Status", "GK has ball")
+        return
+    end
+
+    local Goal = GetOwnGoal()
+
+    if not Goal then
+        Debug("Goal", "Goal not found")
+        return
+    end
+
+    Debug("Goal", Goal:GetFullName())
+
+    local Carrier, CarrierRoot = GetOpponentCarrier()
+
+    if Carrier then
+        LastOpponentCarrier = Carrier
+    end
+
+    local FreeBall, BallDistance = GetNearestFreeBall(Root)
+
+    if FreeBall then
+        Debug("Ball", string.format(
+            "%s distance=%.1f velocity=%.1f",
+            FreeBall.Name,
+            BallDistance,
+            FreeBall.AssemblyLinearVelocity.Magnitude
+        ))
+    else
+        Debug("Ball", "None")
+    end
+
+    -- A distant/harmless loose ball must not drag the GK out of goal.
+    if FreeBall and BallDistance <= 45 then
+        if TryOverheadJump(FreeBall, Root, Humanoid, os.clock()) then
+            return
+        end
+
+        if TryPendingDive(Root, os.clock()) then
+            return
+        end
+
+        if TryGroundDive(Goal, FreeBall, Root, os.clock()) then
+            return
+        end
+    end
+
+    if Carrier and CarrierRoot then
+        local Lateral = GetThreatLateral(Goal, Carrier)
+        local LocalCarrier = Goal.CFrame:PointToObjectSpace(CarrierRoot.Position)
+
+        Debug("Threat", string.format(
+            "PLAYER %s lateral=%.2f depth=%.2f",
+            Carrier.Name,
+            LocalCarrier.X,
+            LocalCarrier.Z
+        ))
+
+        local Depth = math.clamp(
+            10 + math.abs(LocalCarrier.X) / 2,
+            10,
+            15
+        )
+
+        MoveToGoalTarget(
+            Humanoid,
+            Root,
+            Goal,
+            Lateral,
+            Depth
+        )
+
+        return
+    end
+
+    -- No carrier: follow a nearby loose ball only within a controlled
+    -- defensive area.
+    if FreeBall and BallDistance <= 45 then
+        local Predicted = PredictBall(FreeBall, 0.12)
+        local LocalBall = Goal.CFrame:PointToObjectSpace(Predicted)
+
+        local Lateral = math.clamp(
+            LocalBall.X,
+            -GOAL_LATERAL_LIMIT,
+            GOAL_LATERAL_LIMIT
+        )
+
+        local Depth = math.clamp(
+            math.abs(LocalBall.Z) * 0.15,
+            GOAL_MIN_DEPTH,
+            GOAL_MAX_DEPTH
+        )
+
+        Debug("Threat", string.format(
+            "BALL lateral=%.2f depth=%.2f",
+            LocalBall.X,
+            LocalBall.Z
+        ))
+
+        MoveToGoalTarget(
+            Humanoid,
+            Root,
+            Goal,
+            Lateral,
+            Depth
+        )
+
+        return
+    end
+
+    Debug("Threat", "None; returning center")
+    MoveToGoalTarget(Humanoid, Root, Goal, 0, 7)
+end
+
 UserInputService.InputBegan:Connect(function(Input, GameProcessed)
-    if GameProcessed then return end
+    if GameProcessed then
+        return
+    end
+
     if Input.KeyCode == Enum.KeyCode.L then
         Running = false
+
+        if MovementController then
+            MovementController:SetSprintingControlState(false)
+        end
+
         Debug("Status", "Script stopped by L")
         print("[AutoGK] Script stopped.")
     end
@@ -132,57 +576,4 @@ Debug("Loaded", "Script started for " .. LocalPlayer.Name)
 Debug("TeamPosition", LocalPlayer:GetAttribute("TeamPosition"))
 Debug("Side", LocalPlayer:GetAttribute("IsHomeOrAway"))
 
-RunService.Heartbeat:Connect(function()
-    if not Running then return end
-
-    if not IsGoalkeeper() then
-        Debug("Status", "Not GK; TeamPosition=" .. tostring(LocalPlayer:GetAttribute("TeamPosition")))
-        return
-    end
-    Debug("Status", "GK active")
-
-    local Character, Humanoid, Root = GetCharacter()
-    if not Character then return end
-
-    if LocalPlayer:GetAttribute("HasBall") == true then
-        Debug("Status", "GK has ball; stopping movement")
-        StopMovement(Humanoid)
-        return
-    end
-
-    local Goal = GetOwnGoal()
-    if not Goal then
-        Debug("Goal", "Goal object not found")
-        return
-    end
-
-    Debug("Goal", Goal:GetFullName() .. " [" .. Goal.ClassName .. "]")
-
-    local Carrier = GetOpponentCarrier()
-
-    Debug("Carrier", Carrier and Carrier.Name or "None")
-
-    if Carrier then
-        LastOpponentCarrier = Carrier
-    elseif LastOpponentCarrier
-        and IsOpponent(LastOpponentCarrier)
-        and LastOpponentCarrier:GetAttribute("HasBall") == true then
-        Carrier = LastOpponentCarrier
-    else
-        LastOpponentCarrier = nil
-    end
-
-    if Carrier then
-        local Lateral = GetThreatLateral(Goal, Carrier)
-        Debug("Target", "Carrier lateral = " .. string.format("%.2f", Lateral))
-        MoveToGoalPosition(
-            Humanoid,
-            Root,
-            Goal,
-            Lateral
-        )
-    else
-        Debug("Target", "Center")
-        MoveToGoalPosition(Humanoid, Root, Goal, 0)
-    end
-end)
+RunService.Heartbeat:Connect(Update)
