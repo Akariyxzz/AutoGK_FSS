@@ -1,3 +1,4 @@
+- Added camera tracking as the primary lateral positioning signal for the goalkeeper, projecting the camera's center view onto the goal plane.
 # Changelogs
 
 ## Unreleased
